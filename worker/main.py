@@ -1,4 +1,4 @@
-import os, time, tempfile, zipfile, shutil
+import os, time, tempfile, zipfile, shutil, subprocess
 import requests
 from supabase import create_client
 
@@ -28,18 +28,41 @@ def mark(scan_id: str, status: str, **fields):
     supabase.table("scans").update(payload).eq("id", scan_id).execute()
 
 def download_private_zip(zip_path: str, dst_file: str):
-    # Signed URL is easiest + reliable for private buckets
     signed = (
         supabase.storage
         .from_(BUCKET_ZIPS)
-        .create_signed_url(zip_path, 60, {"download": True})
+        .create_signed_url(zip_path, 300, {"download": True})
     )
     url = signed["signedURL"]
 
-    r = requests.get(url, timeout=180)
+    r = requests.get(url, timeout=300)
     r.raise_for_status()
     with open(dst_file, "wb") as f:
         f.write(r.content)
+
+def upload_result_stl(local_file: str, remote_path: str):
+    with open(local_file, "rb") as f:
+        supabase.storage.from_(BUCKET_RESULTS).upload(
+            remote_path,
+            f,
+            {"content-type": "model/stl", "upsert": True},
+        )
+
+def run_pipeline(images_dir: str, out_dir: str):
+    script = os.path.join(os.path.dirname(__file__), "pipeline.sh")
+    subprocess.run(["bash", script, images_dir, out_dir], check=True)
+
+def convert_to_stl(mesh_ply: str, out_stl: str):
+    converter = os.path.join(os.path.dirname(__file__), "convert_to_stl.py")
+    subprocess.run(["python3", converter, mesh_ply, out_stl], check=True)
+
+def count_jpgs(folder: str) -> int:
+    c = 0
+    for root, _, files in os.walk(folder):
+        for name in files:
+            if name.lower().endswith(".jpg") or name.lower().endswith(".jpeg"):
+                c += 1
+    return c
 
 def main():
     print("Worker started. Polling every", POLL_SECONDS, "seconds.")
@@ -53,8 +76,8 @@ def main():
         zip_path = job.get("zip_path")
         user_id = job.get("user_id")
 
-        if not zip_path:
-            mark(scan_id, "failed", error="Missing zip_path")
+        if not zip_path or not user_id:
+            mark(scan_id, "failed", error="Missing zip_path or user_id")
             continue
 
         tmpdir = tempfile.mkdtemp(prefix="spinescan_")
@@ -71,26 +94,45 @@ def main():
             with zipfile.ZipFile(zip_file, "r") as z:
                 z.extractall(extract_dir)
 
-            # MVP plumbing checkpoint: verify images exist
-            jpg_count = 0
-            for root, _, files in os.walk(extract_dir):
-                for name in files:
-                    if name.lower().endswith(".jpg"):
-                        jpg_count += 1
-
+            # Your zip contains jpgs + metadata.json at root
+            jpg_count = count_jpgs(extract_dir)
             print("Extracted JPGs:", jpg_count)
 
-            # Placeholder "result" until COLMAP/OpenMVS is added
-            # We'll later upload STL to scan-results and set stl_path.
-            mark(scan_id, "complete", stl_path=None, error=f"PLUMBING_OK: extracted {jpg_count} jpgs (no reconstruction yet)")
-            print("Marked complete (plumbing ok):", scan_id)
+            images_dir = extract_dir  # images live at root of extract
+            out_dir = os.path.join(tmpdir, "out")
+            os.makedirs(out_dir, exist_ok=True)
 
+            print("Running COLMAP pipeline...")
+            run_pipeline(images_dir, out_dir)
+
+            mesh_ply = os.path.join(out_dir, "mesh.ply")
+            if not os.path.exists(mesh_ply):
+                raise RuntimeError("mesh.ply not created")
+
+            out_stl = os.path.join(out_dir, "result.stl")
+            print("Converting to STL...")
+            convert_to_stl(mesh_ply, out_stl)
+
+            if not os.path.exists(out_stl):
+                raise RuntimeError("result.stl not created")
+
+            remote_stl_path = f"users/{str(user_id).lower()}/{str(scan_id).lower()}/result.stl"
+            print("Uploading STL to:", remote_stl_path)
+            upload_result_stl(out_stl, remote_stl_path)
+
+            mark(scan_id, "complete", stl_path=remote_stl_path, error=None)
+            print("COMPLETE:", scan_id)
+
+        except subprocess.CalledProcessError as e:
+            msg = f"Pipeline failed: {e}"
+            print("FAILED:", scan_id, msg)
+            mark(scan_id, "failed", error=msg)
         except Exception as e:
-            print("FAILED:", scan_id, str(e))
-            mark(scan_id, "failed", error=str(e))
+            msg = str(e)
+            print("FAILED:", scan_id, msg)
+            mark(scan_id, "failed", error=msg)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 if __name__ == "__main__":
     main()
-
