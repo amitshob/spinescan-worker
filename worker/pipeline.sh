@@ -23,16 +23,16 @@ if [ "$IMG_COUNT" -lt 20 ]; then
 fi
 
 # 1) COLMAP sparse reconstruction
-echo "[pipeline] feature_extractor..."
 colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
-  --SiftExtraction.max_image_size 1600
+  --SiftExtraction.max_image_size 1600 \
+  --SiftExtraction.use_gpu 0
 
-echo "[pipeline] exhaustive_matcher..."
 colmap exhaustive_matcher \
-  --database_path "$DB_PATH"
+  --database_path "$DB_PATH" \
+  --SiftMatching.use_gpu 0
 
 echo "[pipeline] mapper..."
 colmap mapper \
