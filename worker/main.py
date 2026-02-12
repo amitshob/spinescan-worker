@@ -42,11 +42,25 @@ def download_private_zip(zip_path: str, dst_file: str):
 
 def upload_result_stl(local_file: str, remote_path: str):
     with open(local_file, "rb") as f:
-        supabase.storage.from_(BUCKET_RESULTS).upload(
-            remote_path,
-            f,
-            {"content-type": "model/stl", "upsert": True},
-        )
+        data = f.read()
+
+    res = supabase.storage.from_(BUCKET_RESULTS).upload(
+        remote_path,
+        data,
+        {"content-type": "model/stl", "upsert": True},
+    )
+
+    # supabase-py may return a dict; fail loudly if upload didn't succeed
+    if isinstance(res, dict) and res.get("error"):
+        raise RuntimeError(f"STL upload failed: {res['error']}")
+
+    # Verify it exists by listing the folder
+    folder = os.path.dirname(remote_path)
+    listed = supabase.storage.from_(BUCKET_RESULTS).list(folder)
+    names = [o.get("name") for o in (listed or [])]
+    if "result.stl" not in names:
+        raise RuntimeError("STL upload verification failed: result.stl not found in scan-results")
+
 
 def run_pipeline(images_dir: str, out_dir: str):
     script = os.path.join(os.path.dirname(__file__), "pipeline.sh")
