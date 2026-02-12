@@ -6,51 +6,73 @@ OUT_DIR="$2"
 
 mkdir -p "$OUT_DIR"
 
-# Working dirs
-DB_DIR="$OUT_DIR/colmap_db"
+DB_PATH="$OUT_DIR/colmap.db"
 SPARSE_DIR="$OUT_DIR/sparse"
 DENSE_DIR="$OUT_DIR/dense"
-MVS_DIR="$OUT_DIR/mvs"
 
-mkdir -p "$SPARSE_DIR" "$DENSE_DIR" "$MVS_DIR"
+mkdir -p "$SPARSE_DIR" "$DENSE_DIR"
 
-# 1) COLMAP: feature extraction + matching + mapping
+echo "[pipeline] images: $IMAGES_DIR"
+echo "[pipeline] out:    $OUT_DIR"
+
+# 0) Basic sanity
+IMG_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) | wc -l | tr -d ' ')
+if [ "$IMG_COUNT" -lt 20 ]; then
+  echo "[pipeline] Not enough images ($IMG_COUNT). Need at least 20."
+  exit 2
+fi
+
+# 1) COLMAP sparse reconstruction
+echo "[pipeline] feature_extractor..."
 colmap feature_extractor \
-  --database_path "$DB_DIR.db" \
+  --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
-  --ImageReader.single_camera 1
+  --ImageReader.single_camera 1 \
+  --SiftExtraction.max_image_size 1600
 
+echo "[pipeline] exhaustive_matcher..."
 colmap exhaustive_matcher \
-  --database_path "$DB_DIR.db"
+  --database_path "$DB_PATH"
 
+echo "[pipeline] mapper..."
 colmap mapper \
-  --database_path "$DB_DIR.db" \
+  --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --output_path "$SPARSE_DIR"
 
-# pick first model folder (0)
 MODEL_DIR="$SPARSE_DIR/0"
+if [ ! -d "$MODEL_DIR" ]; then
+  echo "[pipeline] No sparse model produced (expected $MODEL_DIR)."
+  exit 3
+fi
 
-# 2) COLMAP: dense preparation + stereo + fusion
+# 2) Dense reconstruction prep
+echo "[pipeline] image_undistorter..."
 colmap image_undistorter \
   --image_path "$IMAGES_DIR" \
   --input_path "$MODEL_DIR" \
   --output_path "$DENSE_DIR" \
   --output_type COLMAP
 
+# 3) Dense stereo + fusion
+echo "[pipeline] patch_match_stereo..."
 colmap patch_match_stereo \
   --workspace_path "$DENSE_DIR" \
   --workspace_format COLMAP \
-  --PatchMatchStereo.geom_consistency true
+  --PatchMatchStereo.geom_consistency true \
+  --PatchMatchStereo.max_image_size 1600
 
+echo "[pipeline] stereo_fusion..."
 colmap stereo_fusion \
   --workspace_path "$DENSE_DIR" \
   --workspace_format COLMAP \
   --input_type geometric \
   --output_path "$OUT_DIR/fused.ply"
 
-# 3) Mesh: Poisson (fast-ish, no texture)
+# 4) Mesh (Poisson)
+echo "[pipeline] poisson_mesher..."
 colmap poisson_mesher \
   --input_path "$OUT_DIR/fused.ply" \
   --output_path "$OUT_DIR/mesh.ply"
 
+echo "[pipeline] done -> $OUT_DIR/mesh.ply"
