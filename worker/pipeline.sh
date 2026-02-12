@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=""
+
 set -euo pipefail
 
 IMAGES_DIR="$1"
@@ -28,11 +30,11 @@ colmap feature_extractor \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
   --SiftExtraction.max_image_size 1600 \
-  --SiftExtraction.use_gpu 0
+  
 
 colmap exhaustive_matcher \
   --database_path "$DB_PATH" \
-  --SiftMatching.use_gpu 0
+  
 
 echo "[pipeline] mapper..."
 colmap mapper \
