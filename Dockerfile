@@ -26,19 +26,29 @@ ARG OPENMVS_BRANCH=develop
 ARG VCG_BRANCH=master
 ARG EIGEN_TAG=3.2
 
-# ---- Build COLMAP (CPU) from source tarball ----
+
+
+# --- Download COLMAP source tarball (more reliable endpoint) ---
 RUN set -eux; \
   mkdir -p /tmp/src && cd /tmp/src; \
-  curl -fL --retry 5 --retry-delay 5 \
-    "https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_TAG}.tar.gz" \
+  curl -fL \
+    --retry 10 --retry-delay 5 --retry-all-errors \
+    --connect-timeout 30 --max-time 600 \
+    -H "User-Agent: render-build" \
+    "https://codeload.github.com/colmap/colmap/tar.gz/refs/tags/${COLMAP_TAG}" \
     -o colmap.tar.gz; \
+  ls -lh colmap.tar.gz; \
   tar -xzf colmap.tar.gz; \
-  mv "colmap-${COLMAP_TAG}" colmap; \
+  mv "colmap-${COLMAP_TAG}" colmap
+
+# --- Build COLMAP ---
+RUN set -eux; \
   mkdir -p /tmp/build/colmap && cd /tmp/build/colmap; \
   cmake /tmp/src/colmap -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="/opt"; \
   make -j2; \
   make install; \
-  rm -rf /tmp/src/colmap /tmp/src/colmap.tar.gz /tmp/build/colmap
+  rm -rf /tmp/build/colmap
+
 
 # ---- Build Eigen 3.2 into a dedicated include prefix ----
 RUN set -eux; \
