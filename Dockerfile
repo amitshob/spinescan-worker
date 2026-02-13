@@ -50,9 +50,6 @@ ENV PYTHONPATH=
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Python venv (works fine in Ubuntu)
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /app
 COPY requirements.txt .
