@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ---- System deps ----
 RUN apt-get update && apt-get install -y \
+  ca-certificates curl \
   cmake build-essential git \
   coinor-libclp-dev libceres-dev \
   libjpeg-dev libpng-dev libtiff-dev \
@@ -19,22 +20,41 @@ RUN apt-get update && apt-get install -y \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---- Build COLMAP (CPU) ----
-RUN git clone https://github.com/colmap/colmap.git --branch dev && \
+ARG COLMAP_TAG=3.13.0
+
+RUN set -eux; \
+  for i in 1 2 3 4 5; do \
+    git clone --depth 1 --single-branch --branch "${COLMAP_TAG}" https://github.com/colmap/colmap.git && break; \
+    echo "COLMAP clone failed, retrying in 5s..."; sleep 5; \
+  done; \
   mkdir colmap_build && cd colmap_build && \
   cmake ../colmap -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="/opt" && \
   make -j2 && make install && \
   cd / && rm -rf colmap_build colmap
 
 # ---- Build OpenMVS (CPU) ----
-RUN git clone https://gitlab.com/libeigen/eigen --branch 3.2 && \
+# Build Eigen 3.2 in a dedicated include prefix (avoid some compatibility issues)
+RUN set -eux; \
+  for i in 1 2 3 4 5; do \
+    git clone --depth 1 --single-branch --branch 3.2 https://gitlab.com/libeigen/eigen && break; \
+    echo "Eigen clone failed, retrying in 5s..."; sleep 5; \
+  done; \
   mkdir eigen_build && cd eigen_build && \
   cmake -DCMAKE_BUILD_TYPE=RELEASE -DCMAKE_INSTALL_PREFIX="/usr/local/include/eigen32" ../eigen && \
   make -j2 && make install && \
   cd / && rm -rf eigen_build eigen
 
-RUN git clone https://github.com/cdcseacave/VCG.git /vcglib
+RUN set -eux; \
+  for i in 1 2 3 4 5; do \
+    git clone --depth 1 https://github.com/cdcseacave/VCG.git /vcglib && break; \
+    echo "VCG clone failed, retrying in 5s..."; sleep 5; \
+  done
 
-RUN git clone https://github.com/cdcseacave/openMVS.git --branch develop && \
+RUN set -eux; \
+  for i in 1 2 3 4 5; do \
+    git clone --depth 1 --single-branch --branch develop https://github.com/cdcseacave/openMVS.git && break; \
+    echo "OpenMVS clone failed, retrying in 5s..."; sleep 5; \
+  done; \
   mkdir openMVS_build && cd openMVS_build && \
   cmake ../openMVS -DCMAKE_BUILD_TYPE=Release \
     -DVCG_ROOT=/vcglib \
