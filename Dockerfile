@@ -43,7 +43,8 @@ ENV PATH="/opt/colmap/bin:/opt/openmvs/usr_bin:/opt/openmvs/usr_local_bin:${PATH
 ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/usr_local_lib:${LD_LIBRARY_PATH}"
 
 # Prevent inherited Python env vars from donor images breaking Python
-RUN unset PYTHONHOME && unset PYTHONPATH && python3 -m venv /opt/venv
+ENV PYTHONHOME=
+ENV PYTHONPATH=
 
 # Python venv
 RUN python3 -m venv /opt/venv
