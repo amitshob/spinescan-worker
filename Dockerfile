@@ -42,6 +42,13 @@ COPY --from=openmvs /usr/local/lib/ /opt/openmvs/usr_local_lib/
 ENV PATH="/opt/colmap/bin:/opt/openmvs/usr_bin:/opt/openmvs/usr_local_bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/usr_local_lib:${LD_LIBRARY_PATH}"
 
+# Prevent inherited Python env vars from donor images breaking Python
+RUN unset PYTHONHOME && unset PYTHONPATH && python3 -m venv /opt/venv
+
+# Python venv
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
 # Python venv (works fine in Ubuntu)
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
