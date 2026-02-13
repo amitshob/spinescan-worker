@@ -16,8 +16,10 @@ RUN apt-get update && apt-get install -y \
     locales \
     \
     # Common runtime libs needed by COLMAP/OpenMVS binaries
-    libceres2 libglog0v5 libgflags2.2 \
-    libfreeimage3 libopencv-core4.5d libopencv-imgcodecs4.5d libopencv-imgproc4.5d \
+  # Common runtime libs needed by COLMAP/OpenMVS binaries (Ubuntu 22.04)
+    libceres2 libgoogle-glog0v5 libgflags2.2 \
+    libfreeimage3 \
+    libopencv-core4.5 libopencv-imgcodecs4.5 libopencv-imgproc4.5 \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
     libglew2.2 libglfw3 \
     \
