@@ -29,11 +29,13 @@ colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
-  --SiftExtraction.max_image_size 1600
+  --SiftExtraction.max_image_size 1600 \
+  --SiftExtraction.use_gpu 0
 
 echo "[pipeline] colmap exhaustive_matcher..."
 colmap exhaustive_matcher \
-  --database_path "$DB_PATH"
+  --database_path "$DB_PATH" \
+  --SiftMatching.use_gpu 0
 
 echo "[pipeline] colmap mapper..."
 colmap mapper \
