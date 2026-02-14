@@ -24,14 +24,9 @@ RUN apt-get update && apt-get install -y \
     \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure UTF-8 locale + prevent inherited Python env vars from donor images
+# Ensure UTF-8 locale
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV PYTHONHOME=
-ENV PYTHONPATH=
-
-# Sanity check: fail build if python stdlib is broken
-RUN python3 -c "import site; import sys; print('python ok', sys.version)"
 
 # Copy COLMAP binaries and libs into /opt
 COPY --from=colmap /usr/local/ /opt/colmap/
@@ -44,6 +39,9 @@ COPY --from=openmvs /usr/local/lib/ /opt/openmvs/usr_local_lib/
 # Put tools on PATH and libs on LD_LIBRARY_PATH
 ENV PATH="/opt/colmap/bin:/opt/openmvs/usr_bin:/opt/openmvs/usr_local_bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/usr_local_lib:${LD_LIBRARY_PATH}"
+
+# Sanity check: fail build if python stdlib is broken
+RUN python3 -c "import site; import sys; print('python ok', sys.version)"
 
 # Python venv
 RUN python3 -m venv /opt/venv
