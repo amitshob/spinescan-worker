@@ -56,6 +56,9 @@ RUN mkdir -p /opt/colmap/bin /opt/colmap/lib && \
 ENV PATH="/opt/colmap/bin:/opt/openmvs/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/lib:${LD_LIBRARY_PATH}"
 
+# CRITICAL: Run Qt in headless mode (no display)
+ENV QT_QPA_PLATFORM=offscreen
+
 # Test Python AFTER copying
 RUN python3 -c "import site; import sys; print('Python OK after COPY:', sys.version)"
 
