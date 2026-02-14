@@ -19,7 +19,8 @@ RUN apt-get update && apt-get install -y \
     libopencv-core4.5 libopencv-imgcodecs4.5 libopencv-imgproc4.5 \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
     libglew2.2 libglfw3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*\
+    libgl1-mesa-glx libgl1-mesa-dri mesa-utils
 
 # Ensure UTF-8 locale
 ENV LANG=C.UTF-8
