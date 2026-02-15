@@ -50,7 +50,7 @@ colmap sequential_matcher \
   --database_path "$DB_PATH" \
   --SiftMatching.use_gpu 0 \
   --SequentialMatching.overlap 8 \
-  --SequentialMatching.loop_detection 1
+  --SequentialMatching.loop_detection 0
 
 echo "[pipeline] colmap mapper..."
 colmap mapper \
