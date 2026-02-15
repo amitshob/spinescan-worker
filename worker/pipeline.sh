@@ -21,6 +21,9 @@ mkdir -p "$SPARSE_DIR" "$UNDIST_DIR" "$MVS_DIR"
 echo "[pipeline] images: $IMAGES_DIR"
 echo "[pipeline] out:    $OUT_DIR"
 
+# Remove any non-image files (e.g., metadata.json) so COLMAP doesn't try to read them
+find "$IMAGES_DIR" -maxdepth 1 -type f ! \( -iname "*.jpg" -o -iname "*.jpeg" \) -print -delete || true
+
 IMG_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) | wc -l | tr -d ' ')
 echo "[pipeline] image count: $IMG_COUNT"
 if [ "$IMG_COUNT" -lt 20 ]; then
@@ -29,10 +32,41 @@ if [ "$IMG_COUNT" -lt 20 ]; then
 fi
 
 # --- knobs ---
-MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"              # reduce memory
-RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"              # higher = lower memory, rougher
-SKIP_DENSE="${SKIP_DENSE:-0}"                    # set to 1 to skip densify (low-memory mode)
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"
+RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
+SKIP_DENSE="${SKIP_DENSE:-0}"
+SEQ_OVERLAP="${SEQ_OVERLAP:-8}"
+SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"   # IMPORTANT: 0 to avoid vocab-tree visual index crash
 echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
+echo "[pipeline] SEQ_OVERLAP=$SEQ_OVERLAP SEQ_LOOP_DETECT=$SEQ_LOOP_DETECT"
+
+# Locate OpenMVS binaries (don't rely on PATH)
+OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin}"
+if [ ! -d "$OPENMVS_BIN" ]; then
+  if [ -d "/opt/openmvs/usr_bin" ]; then OPENMVS_BIN="/opt/openmvs/usr_bin"; fi
+  if [ -d "/opt/openmvs/usr_local_bin" ]; then OPENMVS_BIN="/opt/openmvs/usr_local_bin"; fi
+fi
+
+echo "[pipeline] OPENMVS_BIN=$OPENMVS_BIN"
+ls -la "$OPENMVS_BIN" | head -n 80 || true
+
+INTERFACE_COLMAP="$OPENMVS_BIN/InterfaceCOLMAP"
+DENSIFY="$OPENMVS_BIN/DensifyPointCloud"
+RECON_MESH="$OPENMVS_BIN/ReconstructMesh"
+
+if [ ! -x "$INTERFACE_COLMAP" ]; then
+  echo "[pipeline] ERROR: InterfaceCOLMAP not found/executable at $INTERFACE_COLMAP"
+  echo "[pipeline] PATH=$PATH"
+  echo "[pipeline] Searching under /opt for InterfaceCOLMAP..."
+  find /opt -maxdepth 5 -type f -name "InterfaceCOLMAP" -print || true
+  exit 10
+fi
+
+if [ ! -x "$RECON_MESH" ]; then
+  echo "[pipeline] ERROR: ReconstructMesh not found/executable at $RECON_MESH"
+  find /opt -maxdepth 5 -type f -name "ReconstructMesh" -print || true
+  exit 11
+fi
 
 # 1) COLMAP sparse (CPU)
 echo "[pipeline] colmap feature_extractor..."
@@ -49,8 +83,8 @@ echo "[pipeline] colmap sequential_matcher..."
 colmap sequential_matcher \
   --database_path "$DB_PATH" \
   --SiftMatching.use_gpu 0 \
-  --SequentialMatching.overlap 8 \
-  --SequentialMatching.loop_detection 0
+  --SequentialMatching.overlap "$SEQ_OVERLAP" \
+  --SequentialMatching.loop_detection "$SEQ_LOOP_DETECT"
 
 echo "[pipeline] colmap mapper..."
 colmap mapper \
@@ -74,7 +108,7 @@ colmap image_undistorter \
 
 # 3) Convert COLMAP -> OpenMVS scene
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
-InterfaceCOLMAP \
+"$INTERFACE_COLMAP" \
   -i "$UNDIST_DIR" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
@@ -84,18 +118,16 @@ InterfaceCOLMAP \
 if [ "$SKIP_DENSE" = "1" ]; then
   echo "[pipeline] SKIP_DENSE=1 -> skipping DensifyPointCloud, attempting coarse mesh from scene.mvs"
 
-  ReconstructMesh \
+  "$RECON_MESH" \
     "$MVS_DIR/scene.mvs" \
     -w "$MVS_DIR"
 
-  # Common OpenMVS output names vary. Prefer scene_mesh.ply.
   if [ -f "$MVS_DIR/scene_mesh.ply" ]; then
     cp "$MVS_DIR/scene_mesh.ply" "$OUT_DIR/mesh.ply"
     echo "[pipeline] done -> $OUT_DIR/mesh.ply (coarse mesh: scene_mesh.ply)"
     exit 0
   fi
 
-  # Otherwise, grab any .ply produced (best-effort)
   MESH_CANDIDATE=$(ls -1 "$MVS_DIR"/*.ply 2>/dev/null | head -n 1 || true)
   if [ -n "$MESH_CANDIDATE" ]; then
     cp "$MESH_CANDIDATE" "$OUT_DIR/mesh.ply"
@@ -109,15 +141,21 @@ if [ "$SKIP_DENSE" = "1" ]; then
 fi
 
 # 4) Densify point cloud (higher RAM)
+if [ ! -x "$DENSIFY" ]; then
+  echo "[pipeline] ERROR: DensifyPointCloud not found/executable at $DENSIFY"
+  find /opt -maxdepth 5 -type f -name "DensifyPointCloud" -print || true
+  exit 12
+fi
+
 echo "[pipeline] OpenMVS DensifyPointCloud..."
-DensifyPointCloud \
+"$DENSIFY" \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
   --resolution-level "$RES_LEVEL"
 
 # 5) Mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
-ReconstructMesh \
+"$RECON_MESH" \
   "$MVS_DIR/scene_dense.mvs" \
   -w "$MVS_DIR"
 
