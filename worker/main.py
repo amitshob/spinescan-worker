@@ -1,4 +1,10 @@
-import os, time, tempfile, zipfile, shutil, subprocess
+import os
+import time
+import tempfile
+import zipfile
+import shutil
+import subprocess
+import signal
 import requests
 from supabase import create_client
 
@@ -10,6 +16,10 @@ BUCKET_ZIPS = os.environ.get("BUCKET_ZIPS", "scan-zips")
 BUCKET_RESULTS = os.environ.get("BUCKET_RESULTS", "scan-results")
 
 supabase = create_client(SUPABASE_URL, SERVICE_KEY)
+
+# Track current scan so we can mark it failed if the worker is killed (OOM / SIGTERM).
+CURRENT_SCAN_ID = None
+
 
 def pick_next_uploaded():
     resp = (
@@ -23,9 +33,27 @@ def pick_next_uploaded():
     rows = resp.data or []
     return rows[0] if rows else None
 
+
 def mark(scan_id: str, status: str, **fields):
     payload = {"status": status, **fields}
     supabase.table("scans").update(payload).eq("id", scan_id).execute()
+
+
+def _handle_termination(signum, frame):
+    global CURRENT_SCAN_ID
+    # Best-effort: mark the scan as failed if we are being terminated (often due to OOM).
+    if CURRENT_SCAN_ID:
+        try:
+            mark(CURRENT_SCAN_ID, "failed", error="Worker terminated (SIGTERM/SIGINT). Likely OOM / memory limit.")
+            print(f"Marked scan failed due to termination: {CURRENT_SCAN_ID}")
+        except Exception as e:
+            print(f"Failed to mark scan failed on termination: {e}")
+    raise SystemExit(1)
+
+
+signal.signal(signal.SIGTERM, _handle_termination)
+signal.signal(signal.SIGINT, _handle_termination)
+
 
 def download_private_zip(zip_path: str, dst_file: str):
     signed = (
@@ -40,7 +68,9 @@ def download_private_zip(zip_path: str, dst_file: str):
     with open(dst_file, "wb") as f:
         f.write(r.content)
 
+
 def upload_result_stl(local_file: str, remote_path: str):
+    # Upload bytes to avoid any file-handle API mismatch.
     with open(local_file, "rb") as f:
         data = f.read()
 
@@ -50,11 +80,11 @@ def upload_result_stl(local_file: str, remote_path: str):
         {"content-type": "model/stl", "upsert": True},
     )
 
-    # supabase-py may return a dict; fail loudly if upload didn't succeed
+    # Some client versions return dicts; fail loudly if there's an explicit error.
     if isinstance(res, dict) and res.get("error"):
         raise RuntimeError(f"STL upload failed: {res['error']}")
 
-    # Verify it exists by listing the folder
+    # Verify object exists
     folder = os.path.dirname(remote_path)
     listed = supabase.storage.from_(BUCKET_RESULTS).list(folder)
     names = [o.get("name") for o in (listed or [])]
@@ -66,19 +96,24 @@ def run_pipeline(images_dir: str, out_dir: str):
     script = os.path.join(os.path.dirname(__file__), "pipeline.sh")
     subprocess.run(["bash", script, images_dir, out_dir], check=True)
 
+
 def convert_to_stl(mesh_ply: str, out_stl: str):
     converter = os.path.join(os.path.dirname(__file__), "convert_to_stl.py")
     subprocess.run(["python3", converter, mesh_ply, out_stl], check=True)
+
 
 def count_jpgs(folder: str) -> int:
     c = 0
     for root, _, files in os.walk(folder):
         for name in files:
-            if name.lower().endswith(".jpg") or name.lower().endswith(".jpeg"):
+            n = name.lower()
+            if n.endswith(".jpg") or n.endswith(".jpeg"):
                 c += 1
     return c
 
+
 def main():
+    global CURRENT_SCAN_ID
     print("Worker started. Polling every", POLL_SECONDS, "seconds.")
     while True:
         job = pick_next_uploaded()
@@ -94,7 +129,9 @@ def main():
             mark(scan_id, "failed", error="Missing zip_path or user_id")
             continue
 
+        CURRENT_SCAN_ID = scan_id
         tmpdir = tempfile.mkdtemp(prefix="spinescan_")
+
         try:
             print("Claiming scan:", scan_id)
             mark(scan_id, "processing", error=None)
@@ -108,11 +145,10 @@ def main():
             with zipfile.ZipFile(zip_file, "r") as z:
                 z.extractall(extract_dir)
 
-            # Your zip contains jpgs + metadata.json at root
             jpg_count = count_jpgs(extract_dir)
             print("Extracted JPGs:", jpg_count)
 
-            images_dir = extract_dir  # images live at root of extract
+            images_dir = extract_dir
             out_dir = os.path.join(tmpdir, "out")
             os.makedirs(out_dir, exist_ok=True)
 
@@ -141,12 +177,16 @@ def main():
             msg = f"Pipeline failed: {e}"
             print("FAILED:", scan_id, msg)
             mark(scan_id, "failed", error=msg)
+
         except Exception as e:
             msg = str(e)
             print("FAILED:", scan_id, msg)
             mark(scan_id, "failed", error=msg)
+
         finally:
+            CURRENT_SCAN_ID = None
             shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     main()
