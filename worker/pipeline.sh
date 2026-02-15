@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Keep memory predictable
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -26,13 +28,19 @@ if [ "$IMG_COUNT" -lt 20 ]; then
   exit 2
 fi
 
+# --- knobs ---
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"              # was 1024
+RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"              # was 3
+SKIP_DENSE="${SKIP_DENSE:-0}"                    # set to 1 to avoid OpenMVS densify/mesh
+echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
+
 # 1) COLMAP sparse (CPU)
 echo "[pipeline] colmap feature_extractor..."
 colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
-  --SiftExtraction.max_image_size 1024 \
+  --SiftExtraction.max_image_size "$MAX_IMG_SIZE" \
   --SiftExtraction.use_gpu 0
 
 echo "[pipeline] colmap exhaustive_matcher..."
@@ -52,6 +60,17 @@ if [ ! -d "$MODEL_DIR" ]; then
   exit 3
 fi
 
+# Optional low-memory MVP: skip dense and output sparse point cloud PLY
+if [ "$SKIP_DENSE" = "1" ]; then
+  echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
+  colmap model_converter \
+    --input_path "$MODEL_DIR" \
+    --output_path "$OUT_DIR/mesh.ply" \
+    --output_type PLY
+  echo "[pipeline] done -> $OUT_DIR/mesh.ply (sparse point cloud)"
+  exit 0
+fi
+
 # 2) Undistort images for OpenMVS
 echo "[pipeline] colmap image_undistorter..."
 colmap image_undistorter \
@@ -67,13 +86,17 @@ InterfaceCOLMAP \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# 4) Densify point cloud (speed-first)
-# resolution-level: higher = faster/rougher. Start at 2.
+# Reduce pressure: we don't need the full undistorted image set after conversion
+# (OpenMVS will reference files in its work dir; keep work dir, drop heavy folders if needed)
+# Uncomment if disk pressure becomes an issue:
+# rm -rf "$UNDIST_DIR/images" || true
+
+# 4) Densify point cloud (lower memory)
 echo "[pipeline] OpenMVS DensifyPointCloud..."
 DensifyPointCloud \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
-  --resolution-level 3
+  --resolution-level "$RES_LEVEL"
 
 # 5) Mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
