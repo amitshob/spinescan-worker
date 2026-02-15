@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
 
 IMAGES_DIR="$1"
 OUT_DIR="$2"
@@ -29,7 +32,7 @@ colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
-  --SiftExtraction.max_image_size 1600 \
+  --SiftExtraction.max_image_size 1024 \
   --SiftExtraction.use_gpu 0
 
 echo "[pipeline] colmap exhaustive_matcher..."
@@ -70,7 +73,7 @@ echo "[pipeline] OpenMVS DensifyPointCloud..."
 DensifyPointCloud \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
-  --resolution-level 2
+  --resolution-level 3
 
 # 5) Mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
