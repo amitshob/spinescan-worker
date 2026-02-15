@@ -41,12 +41,16 @@ colmap feature_extractor \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
   --SiftExtraction.max_image_size "$MAX_IMG_SIZE" \
+  --SiftExtraction.num_threads 1 \
+  --SiftExtraction.peak_threshold 0.02 \
   --SiftExtraction.use_gpu 0
 
-echo "[pipeline] colmap exhaustive_matcher..."
-colmap exhaustive_matcher \
+echo "[pipeline] colmap sequential_matcher..."
+colmap sequential_matcher \
   --database_path "$DB_PATH" \
-  --SiftMatching.use_gpu 0
+  --SiftMatching.use_gpu 0 \
+  --SequentialMatching.overlap 8 \
+  --SequentialMatching.loop_detection 1
 
 echo "[pipeline] colmap mapper..."
 colmap mapper \
