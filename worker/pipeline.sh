@@ -29,9 +29,9 @@ if [ "$IMG_COUNT" -lt 20 ]; then
 fi
 
 # --- knobs ---
-MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"              # was 1024
-RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"              # was 3
-SKIP_DENSE="${SKIP_DENSE:-0}"                    # set to 1 to avoid OpenMVS densify/mesh
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"              # reduce memory
+RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"              # higher = lower memory, rougher
+SKIP_DENSE="${SKIP_DENSE:-0}"                    # set to 1 to skip densify (low-memory mode)
 echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
 
 # 1) COLMAP sparse (CPU)
@@ -60,17 +60,6 @@ if [ ! -d "$MODEL_DIR" ]; then
   exit 3
 fi
 
-# Optional low-memory MVP: skip dense and output sparse point cloud PLY
-if [ "$SKIP_DENSE" = "1" ]; then
-  echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
-  colmap model_converter \
-    --input_path "$MODEL_DIR" \
-    --output_path "$OUT_DIR/mesh.ply" \
-    --output_type PLY
-  echo "[pipeline] done -> $OUT_DIR/mesh.ply (sparse point cloud)"
-  exit 0
-fi
-
 # 2) Undistort images for OpenMVS
 echo "[pipeline] colmap image_undistorter..."
 colmap image_undistorter \
@@ -86,12 +75,36 @@ InterfaceCOLMAP \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# Reduce pressure: we don't need the full undistorted image set after conversion
-# (OpenMVS will reference files in its work dir; keep work dir, drop heavy folders if needed)
-# Uncomment if disk pressure becomes an issue:
-# rm -rf "$UNDIST_DIR/images" || true
+# LOW-MEMORY MODE:
+# Skip DensifyPointCloud (biggest RAM hog). Try to reconstruct a coarse mesh directly from scene.mvs.
+if [ "$SKIP_DENSE" = "1" ]; then
+  echo "[pipeline] SKIP_DENSE=1 -> skipping DensifyPointCloud, attempting coarse mesh from scene.mvs"
 
-# 4) Densify point cloud (lower memory)
+  ReconstructMesh \
+    "$MVS_DIR/scene.mvs" \
+    -w "$MVS_DIR"
+
+  # Common OpenMVS output names vary. Prefer scene_mesh.ply.
+  if [ -f "$MVS_DIR/scene_mesh.ply" ]; then
+    cp "$MVS_DIR/scene_mesh.ply" "$OUT_DIR/mesh.ply"
+    echo "[pipeline] done -> $OUT_DIR/mesh.ply (coarse mesh: scene_mesh.ply)"
+    exit 0
+  fi
+
+  # Otherwise, grab any .ply produced (best-effort)
+  MESH_CANDIDATE=$(ls -1 "$MVS_DIR"/*.ply 2>/dev/null | head -n 1 || true)
+  if [ -n "$MESH_CANDIDATE" ]; then
+    cp "$MESH_CANDIDATE" "$OUT_DIR/mesh.ply"
+    echo "[pipeline] done -> $OUT_DIR/mesh.ply (coarse mesh: $(basename "$MESH_CANDIDATE"))"
+    exit 0
+  fi
+
+  echo "[pipeline] SKIP_DENSE=1 but no mesh PLY produced"
+  ls -la "$MVS_DIR" || true
+  exit 4
+fi
+
+# 4) Densify point cloud (higher RAM)
 echo "[pipeline] OpenMVS DensifyPointCloud..."
 DensifyPointCloud \
   "$MVS_DIR/scene.mvs" \
