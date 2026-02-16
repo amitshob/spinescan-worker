@@ -19,8 +19,7 @@ RUN apt-get update && apt-get install -y \
     libopencv-core4.5 libopencv-imgcodecs4.5 libopencv-imgproc4.5 \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
     libglew2.2 libglfw3 \
-    && rm -rf /var/lib/apt/lists/*\
-    libgl1-mesa-glx libgl1-mesa-dri mesa-utils
+    && rm -rf /var/lib/apt/lists/*
 
 # Ensure UTF-8 locale
 ENV LANG=C.UTF-8
@@ -36,20 +35,27 @@ COPY --from=openmvs /usr/local/bin/ /tmp/openmvs_usr_local_bin/
 COPY --from=openmvs /usr/local/lib/ /tmp/openmvs_usr_local_lib/
 
 # Move only what we need, excluding Python-related files
-RUN mkdir -p /opt/colmap/bin /opt/colmap/lib && \
-    mkdir -p /opt/openmvs/bin /opt/openmvs/lib && \
+RUN set -eux; \
+    mkdir -p /opt/colmap/bin /opt/colmap/lib; \
+    mkdir -p /opt/openmvs/bin /opt/openmvs/lib; \
+    \
     # Copy COLMAP binaries
     if [ -d /tmp/colmap_files/bin ]; then \
       cp -r /tmp/colmap_files/bin/* /opt/colmap/bin/ 2>/dev/null || true; \
-    fi && \
+    fi; \
+    \
     # Copy COLMAP libs (but skip Python)
     if [ -d /tmp/colmap_files/lib ]; then \
       find /tmp/colmap_files/lib -name "*.so*" ! -path "*/python*" -exec cp -d {} /opt/colmap/lib/ \; 2>/dev/null || true; \
-    fi && \
-    # Copy OpenMVS binaries
-    cp /tmp/openmvs_usr_local_bin/* /opt/openmvs/bin/ 2>/dev/null || true && \
+    fi; \
+    \
+    # Copy OpenMVS binaries (IMPORTANT: most are in /usr/bin)
+    cp -r /tmp/openmvs_usr_bin/* /opt/openmvs/bin/ 2>/dev/null || true; \
+    cp -r /tmp/openmvs_usr_local_bin/* /opt/openmvs/bin/ 2>/dev/null || true; \
+    \
     # Copy OpenMVS libs (but skip Python)
-    find /tmp/openmvs_usr_local_lib -name "*.so*" ! -path "*/python*" -exec cp -d {} /opt/openmvs/lib/ \; 2>/dev/null || true && \
+    find /tmp/openmvs_usr_local_lib -name "*.so*" ! -path "*/python*" -exec cp -d {} /opt/openmvs/lib/ \; 2>/dev/null || true; \
+    \
     # Clean up temp files
     rm -rf /tmp/colmap_files /tmp/openmvs_usr_bin /tmp/openmvs_usr_local_bin /tmp/openmvs_usr_local_lib
 
@@ -59,6 +65,11 @@ ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/lib:${LD_LIBRARY_PATH}"
 
 # CRITICAL: Run Qt in headless mode (no display)
 ENV QT_QPA_PLATFORM=offscreen
+
+# Sanity checks: OpenMVS must exist
+RUN ls -la /opt/openmvs/bin | head -n 80 && \
+    test -x /opt/openmvs/bin/InterfaceCOLMAP && \
+    /opt/openmvs/bin/InterfaceCOLMAP -h | head -n 5
 
 # Test Python AFTER copying
 RUN python3 -c "import site; import sys; print('Python OK after COPY:', sys.version)"
