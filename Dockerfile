@@ -1,15 +1,31 @@
 # ---- Stage 1: OpenMVS donor ----
 FROM openmvs/openmvs-ubuntu:latest AS openmvs
 
+# Export only the OpenMVS tools we need, wherever they are installed in the image.
+RUN set -eux; \
+    mkdir -p /export/bin /export/lib; \
+    for b in InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do \
+      p="$(command -v "$b" 2>/dev/null || true)"; \
+      if [ -z "$p" ]; then p="$(find / -type f -name "$b" -perm -111 2>/dev/null | head -n 1 || true)"; fi; \
+      echo "[openmvs] $b -> $p"; \
+      test -n "$p"; \
+      cp "$p" /export/bin/; \
+    done; \
+    # Copy dependent shared libs (best-effort) so runtime stage can execute the tools
+    (for f in /export/bin/*; do ldd "$f" | awk '/=>/ {print $3} /^[[:space:]]*\/.*\.so/ {print $1}'; done) \
+      | sort -u \
+      | while read -r so; do \
+          if [ -f "$so" ]; then cp -L "$so" /export/lib/; fi; \
+        done; \
+    ls -la /export/bin
+
 # ---- Stage 2: COLMAP donor (CPU-only) ----
 FROM graffitytech/colmap:3.8-cpu-ubuntu22.04 AS colmap
 
-# ---- Stage 3: Final runtime (stable Python) ----
+# ---- Stage 3: Final runtime ----
 FROM ubuntu:22.04
-
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python FIRST before any COPY operations
 RUN apt-get update && apt-get install -y \
     ca-certificates bash \
     python3-full python3-venv python3-pip \
@@ -21,58 +37,28 @@ RUN apt-get update && apt-get install -y \
     libglew2.2 libglfw3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure UTF-8 locale
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
+ENV QT_QPA_PLATFORM=offscreen
 
-# Test Python BEFORE copying anything
-RUN python3 -c "import site; import sys; print('Python OK before COPY:', sys.version)"
+# COLMAP
+RUN mkdir -p /opt/colmap/bin /opt/colmap/lib
+COPY --from=colmap /usr/local/bin/ /opt/colmap/bin/
+COPY --from=colmap /usr/local/lib/ /opt/colmap/lib/
 
-# Copy everything from donor images to separate staging areas
-COPY --from=colmap /usr/local/ /tmp/colmap_files/
-COPY --from=openmvs /usr/bin/ /tmp/openmvs_usr_bin/
-COPY --from=openmvs /usr/local/bin/ /tmp/openmvs_usr_local_bin/
-COPY --from=openmvs /usr/local/lib/ /tmp/openmvs_usr_local_lib/
+# OpenMVS (only exported tools + libs)
+RUN mkdir -p /opt/openmvs/bin /opt/openmvs/lib
+COPY --from=openmvs /export/bin/ /opt/openmvs/bin/
+COPY --from=openmvs /export/lib/ /opt/openmvs/lib/
 
-# Move only what we need, excluding Python-related files
-RUN set -eux; \
-    mkdir -p /opt/colmap/bin /opt/colmap/lib; \
-    mkdir -p /opt/openmvs/bin /opt/openmvs/lib; \
-    \
-    # Copy COLMAP binaries
-    if [ -d /tmp/colmap_files/bin ]; then \
-      cp -r /tmp/colmap_files/bin/* /opt/colmap/bin/ 2>/dev/null || true; \
-    fi; \
-    \
-    # Copy COLMAP libs (but skip Python)
-    if [ -d /tmp/colmap_files/lib ]; then \
-      find /tmp/colmap_files/lib -name "*.so*" ! -path "*/python*" -exec cp -d {} /opt/colmap/lib/ \; 2>/dev/null || true; \
-    fi; \
-    \
-    # Copy OpenMVS binaries (IMPORTANT: most are in /usr/bin)
-    cp -r /tmp/openmvs_usr_bin/* /opt/openmvs/bin/ 2>/dev/null || true; \
-    cp -r /tmp/openmvs_usr_local_bin/* /opt/openmvs/bin/ 2>/dev/null || true; \
-    \
-    # Copy OpenMVS libs (but skip Python)
-    find /tmp/openmvs_usr_local_lib -name "*.so*" ! -path "*/python*" -exec cp -d {} /opt/openmvs/lib/ \; 2>/dev/null || true; \
-    \
-    # Clean up temp files
-    rm -rf /tmp/colmap_files /tmp/openmvs_usr_bin /tmp/openmvs_usr_local_bin /tmp/openmvs_usr_local_lib
-
-# Put tools on PATH
+# PATHs
 ENV PATH="/opt/colmap/bin:/opt/openmvs/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/colmap/lib:/opt/openmvs/lib:${LD_LIBRARY_PATH}"
 
-# CRITICAL: Run Qt in headless mode (no display)
-ENV QT_QPA_PLATFORM=offscreen
-
-# Sanity checks: OpenMVS must exist
-RUN ls -la /opt/openmvs/bin | head -n 80 && \
+# Sanity checks (fail build if missing)
+RUN ls -la /opt/openmvs/bin && \
     test -x /opt/openmvs/bin/InterfaceCOLMAP && \
     /opt/openmvs/bin/InterfaceCOLMAP -h | head -n 5
-
-# Test Python AFTER copying
-RUN python3 -c "import site; import sys; print('Python OK after COPY:', sys.version)"
 
 # Python venv
 RUN python3 -m venv /opt/venv
