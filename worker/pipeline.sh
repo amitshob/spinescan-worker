@@ -1,3 +1,5 @@
+trap 'echo "[pipeline] ERROR on line $LINENO. Last command: $BASH_COMMAND" >&2' ERR
+
 #!/usr/bin/env bash
 set -euo pipefail
 
