@@ -1,9 +1,6 @@
-trap 'echo "[pipeline] ERROR on line $LINENO. Last command: $BASH_COMMAND" >&2' ERR
-
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Keep memory predictable
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -23,9 +20,23 @@ mkdir -p "$SPARSE_DIR" "$UNDIST_DIR" "$MVS_DIR"
 echo "[pipeline] images: $IMAGES_DIR"
 echo "[pipeline] out:    $OUT_DIR"
 
-# Remove any non-image files (e.g., metadata.json) so COLMAP doesn't try to read them
-find "$IMAGES_DIR" -maxdepth 1 -type f ! \( -iname "*.jpg" -o -iname "*.jpeg" \) -print -delete || true
+# --- knobs ---
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"
+SEQ_OVERLAP="${SEQ_OVERLAP:-8}"
+SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"
+RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
+SKIP_DENSE="${SKIP_DENSE:-1}"   # keep 1 for now to avoid OOM
+OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin}"
 
+echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
+echo "[pipeline] SEQ_OVERLAP=$SEQ_OVERLAP SEQ_LOOP_DETECT=$SEQ_LOOP_DETECT"
+echo "[pipeline] OPENMVS_BIN=$OPENMVS_BIN"
+
+# Ensure tools exist
+command -v colmap >/dev/null 2>&1 || { echo "[pipeline] ERROR: colmap not found in PATH"; exit 11; }
+test -x "$OPENMVS_BIN/InterfaceCOLMAP" || { echo "[pipeline] ERROR: InterfaceCOLMAP missing at $OPENMVS_BIN/InterfaceCOLMAP"; exit 10; }
+
+# Count only jpg/jpeg (ignore metadata.json and others)
 IMG_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) | wc -l | tr -d ' ')
 echo "[pipeline] image count: $IMG_COUNT"
 if [ "$IMG_COUNT" -lt 20 ]; then
@@ -33,61 +44,16 @@ if [ "$IMG_COUNT" -lt 20 ]; then
   exit 2
 fi
 
-# --- knobs ---
-MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"
-RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
-SKIP_DENSE="${SKIP_DENSE:-1}"          # default to 1 to avoid OOM until we upgrade memory
-SEQ_OVERLAP="${SEQ_OVERLAP:-8}"
-SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"   # keep 0 (loop detection needs vocab tree)
-echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
-echo "[pipeline] SEQ_OVERLAP=$SEQ_OVERLAP SEQ_LOOP_DETECT=$SEQ_LOOP_DETECT"
-
-# Locate OpenMVS binaries (don't rely on PATH)
-OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin}"
-echo "[pipeline] OPENMVS_BIN=$OPENMVS_BIN"
-ls -la "$OPENMVS_BIN" | head -n 120 || true
-
-INTERFACE_COLMAP="$OPENMVS_BIN/InterfaceCOLMAP"
-DENSIFY="$OPENMVS_BIN/DensifyPointCloud"
-RECON_MESH="$OPENMVS_BIN/ReconstructMesh"
-REFINE_MESH="$OPENMVS_BIN/RefineMesh"
-TEXTURE_MESH="$OPENMVS_BIN/TextureMesh"
-
-# Run OpenMVS tools with a private LD_LIBRARY_PATH so COLMAP is never affected
-run_openmvs () {
-  LD_LIBRARY_PATH="/opt/openmvs/lib:${LD_LIBRARY_PATH:-}" "$@"
-}
-
-if ! command -v colmap >/dev/null 2>&1; then
-  echo "[pipeline] ERROR: colmap not found on PATH"
-  echo "[pipeline] PATH=$PATH"
-  exit 20
-fi
-
-if [ ! -x "$INTERFACE_COLMAP" ]; then
-  echo "[pipeline] ERROR: InterfaceCOLMAP not found/executable at $INTERFACE_COLMAP"
-  echo "[pipeline] Searching under /opt for InterfaceCOLMAP..."
-  find /opt -maxdepth 6 -type f -name "InterfaceCOLMAP" -print || true
-  exit 10
-fi
-
-if [ ! -x "$RECON_MESH" ]; then
-  echo "[pipeline] ERROR: ReconstructMesh not found/executable at $RECON_MESH"
-  find /opt -maxdepth 6 -type f -name "ReconstructMesh" -print || true
-  exit 11
-fi
-
-# 1) COLMAP sparse (CPU)
+# 1) Feature extraction (CPU)
 echo "[pipeline] colmap feature_extractor..."
 colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
   --SiftExtraction.max_image_size "$MAX_IMG_SIZE" \
-  --SiftExtraction.num_threads 1 \
-  --SiftExtraction.peak_threshold 0.02 \
   --SiftExtraction.use_gpu 0
 
+# 2) Sequential matching (CPU) - no loop detection to avoid visual index issues
 echo "[pipeline] colmap sequential_matcher..."
 colmap sequential_matcher \
   --database_path "$DB_PATH" \
@@ -95,6 +61,7 @@ colmap sequential_matcher \
   --SequentialMatching.overlap "$SEQ_OVERLAP" \
   --SequentialMatching.loop_detection "$SEQ_LOOP_DETECT"
 
+# 3) Sparse reconstruction
 echo "[pipeline] colmap mapper..."
 colmap mapper \
   --database_path "$DB_PATH" \
@@ -104,10 +71,20 @@ colmap mapper \
 MODEL_DIR="$SPARSE_DIR/0"
 if [ ! -d "$MODEL_DIR" ]; then
   echo "[pipeline] No sparse model produced (expected $MODEL_DIR)."
+  find "$SPARSE_DIR" -maxdepth 2 -type f || true
   exit 3
 fi
 
-# 2) Undistort images for OpenMVS
+# (Optional) sanity: warn if too few registered images
+# images.bin existence implies model exists; for count, rely on text export:
+TMP_TXT="$OUT_DIR/model_txt"
+rm -rf "$TMP_TXT" || true
+mkdir -p "$TMP_TXT"
+colmap model_converter --input_path "$MODEL_DIR" --output_path "$TMP_TXT" --output_type TXT >/dev/null 2>&1 || true
+REG_IMAGES=$(grep -c "^#" "$TMP_TXT/images.txt" 2>/dev/null || true)
+echo "[pipeline] registered images (approx): ${REG_IMAGES:-unknown}"
+
+# 4) Undistort for OpenMVS
 echo "[pipeline] colmap image_undistorter..."
 colmap image_undistorter \
   --image_path "$IMAGES_DIR" \
@@ -115,64 +92,66 @@ colmap image_undistorter \
   --output_path "$UNDIST_DIR" \
   --output_type COLMAP
 
-# 3) Convert COLMAP -> OpenMVS scene
+# 5) Normalize sparse layout for InterfaceCOLMAP
+# Some COLMAP versions create: undistorted/sparse/0/{cameras,images,points3D}.txt
+# InterfaceCOLMAP expects:       undistorted/sparse/{cameras,images,points3D}.txt
+echo "[pipeline] normalize undistorted sparse folder..."
+if [ -d "$UNDIST_DIR/sparse/0" ] && [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
+  echo "[pipeline] moving sparse/0/* -> sparse/"
+  cp -f "$UNDIST_DIR/sparse/0/"*.txt "$UNDIST_DIR/sparse/" || true
+fi
+
+# If still not present, export to TXT directly into undistorted/sparse
+if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
+  echo "[pipeline] sparse txt not found after undistort; exporting TXT from model..."
+  colmap model_converter \
+    --input_path "$MODEL_DIR" \
+    --output_path "$UNDIST_DIR/sparse" \
+    --output_type TXT
+fi
+
+# Hard fail if missing
+if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
+  echo "[pipeline] ERROR: missing $UNDIST_DIR/sparse/cameras.txt"
+  ls -la "$UNDIST_DIR/sparse" || true
+  find "$UNDIST_DIR" -maxdepth 3 -type f | head -n 200 || true
+  exit 12
+fi
+
+# 6) Convert COLMAP -> OpenMVS
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
-run_openmvs "$INTERFACE_COLMAP" \
+"$OPENMVS_BIN/InterfaceCOLMAP" \
   -i "$UNDIST_DIR" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# LOW-MEMORY MODE (default):
-# Skip densify (biggest RAM hog). Attempt a coarse mesh directly.
+# If you want ultra-low-memory MVP, stop here and output sparse point cloud
 if [ "$SKIP_DENSE" = "1" ]; then
-  echo "[pipeline] SKIP_DENSE=1 -> attempting coarse mesh from scene.mvs"
-
-  run_openmvs "$RECON_MESH" \
-    "$MVS_DIR/scene.mvs" \
-    -w "$MVS_DIR"
-
-  # OpenMVS naming varies by build; grab first produced PLY
-  if [ -f "$MVS_DIR/scene_mesh.ply" ]; then
-    cp "$MVS_DIR/scene_mesh.ply" "$OUT_DIR/mesh.ply"
-    echo "[pipeline] done -> $OUT_DIR/mesh.ply (scene_mesh.ply)"
-    exit 0
-  fi
-
-  MESH_CANDIDATE="$(ls -1 "$MVS_DIR"/*.ply 2>/dev/null | head -n 1 || true)"
-  if [ -n "$MESH_CANDIDATE" ]; then
-    cp "$MESH_CANDIDATE" "$OUT_DIR/mesh.ply"
-    echo "[pipeline] done -> $OUT_DIR/mesh.ply ($(basename "$MESH_CANDIDATE"))"
-    exit 0
-  fi
-
-  echo "[pipeline] SKIP_DENSE=1 but no mesh PLY produced"
-  ls -la "$MVS_DIR" || true
-  exit 4
+  echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
+  colmap model_converter \
+    --input_path "$MODEL_DIR" \
+    --output_path "$OUT_DIR/mesh.ply" \
+    --output_type PLY
+  echo "[pipeline] done -> $OUT_DIR/mesh.ply (sparse point cloud)"
+  exit 0
 fi
 
-# 4) Densify point cloud (higher RAM) — only if enabled
-if [ ! -x "$DENSIFY" ]; then
-  echo "[pipeline] ERROR: DensifyPointCloud not found/executable at $DENSIFY"
-  find /opt -maxdepth 6 -type f -name "DensifyPointCloud" -print || true
-  exit 12
-fi
-
+# 7) Dense + Mesh (likely OOM on small plans)
 echo "[pipeline] OpenMVS DensifyPointCloud..."
-run_openmvs "$DENSIFY" \
+"$OPENMVS_BIN/DensifyPointCloud" \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
   --resolution-level "$RES_LEVEL"
 
-# 5) Mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
-run_openmvs "$RECON_MESH" \
+"$OPENMVS_BIN/ReconstructMesh" \
   "$MVS_DIR/scene_dense.mvs" \
   -w "$MVS_DIR"
 
 if [ ! -f "$MVS_DIR/scene_dense_mesh.ply" ]; then
   echo "[pipeline] Expected mesh not found: $MVS_DIR/scene_dense_mesh.ply"
   ls -la "$MVS_DIR" || true
-  exit 5
+  exit 4
 fi
 
 cp "$MVS_DIR/scene_dense_mesh.ply" "$OUT_DIR/mesh.ply"
