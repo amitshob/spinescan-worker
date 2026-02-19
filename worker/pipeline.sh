@@ -34,37 +34,44 @@ fi
 # --- knobs ---
 MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"
 RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
-SKIP_DENSE="${SKIP_DENSE:-0}"
+SKIP_DENSE="${SKIP_DENSE:-1}"          # default to 1 to avoid OOM until we upgrade memory
 SEQ_OVERLAP="${SEQ_OVERLAP:-8}"
-SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"   # IMPORTANT: 0 to avoid vocab-tree visual index crash
+SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"   # keep 0 (loop detection needs vocab tree)
 echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
 echo "[pipeline] SEQ_OVERLAP=$SEQ_OVERLAP SEQ_LOOP_DETECT=$SEQ_LOOP_DETECT"
 
 # Locate OpenMVS binaries (don't rely on PATH)
 OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin}"
-if [ ! -d "$OPENMVS_BIN" ]; then
-  if [ -d "/opt/openmvs/usr_bin" ]; then OPENMVS_BIN="/opt/openmvs/usr_bin"; fi
-  if [ -d "/opt/openmvs/usr_local_bin" ]; then OPENMVS_BIN="/opt/openmvs/usr_local_bin"; fi
-fi
-
 echo "[pipeline] OPENMVS_BIN=$OPENMVS_BIN"
-ls -la "$OPENMVS_BIN" | head -n 80 || true
+ls -la "$OPENMVS_BIN" | head -n 120 || true
 
 INTERFACE_COLMAP="$OPENMVS_BIN/InterfaceCOLMAP"
 DENSIFY="$OPENMVS_BIN/DensifyPointCloud"
 RECON_MESH="$OPENMVS_BIN/ReconstructMesh"
+REFINE_MESH="$OPENMVS_BIN/RefineMesh"
+TEXTURE_MESH="$OPENMVS_BIN/TextureMesh"
+
+# Run OpenMVS tools with a private LD_LIBRARY_PATH so COLMAP is never affected
+run_openmvs () {
+  LD_LIBRARY_PATH="/opt/openmvs/lib:${LD_LIBRARY_PATH:-}" "$@"
+}
+
+if ! command -v colmap >/dev/null 2>&1; then
+  echo "[pipeline] ERROR: colmap not found on PATH"
+  echo "[pipeline] PATH=$PATH"
+  exit 20
+fi
 
 if [ ! -x "$INTERFACE_COLMAP" ]; then
   echo "[pipeline] ERROR: InterfaceCOLMAP not found/executable at $INTERFACE_COLMAP"
-  echo "[pipeline] PATH=$PATH"
   echo "[pipeline] Searching under /opt for InterfaceCOLMAP..."
-  find /opt -maxdepth 5 -type f -name "InterfaceCOLMAP" -print || true
+  find /opt -maxdepth 6 -type f -name "InterfaceCOLMAP" -print || true
   exit 10
 fi
 
 if [ ! -x "$RECON_MESH" ]; then
   echo "[pipeline] ERROR: ReconstructMesh not found/executable at $RECON_MESH"
-  find /opt -maxdepth 5 -type f -name "ReconstructMesh" -print || true
+  find /opt -maxdepth 6 -type f -name "ReconstructMesh" -print || true
   exit 11
 fi
 
@@ -108,30 +115,31 @@ colmap image_undistorter \
 
 # 3) Convert COLMAP -> OpenMVS scene
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
-"$INTERFACE_COLMAP" \
+run_openmvs "$INTERFACE_COLMAP" \
   -i "$UNDIST_DIR" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# LOW-MEMORY MODE:
-# Skip DensifyPointCloud (biggest RAM hog). Try to reconstruct a coarse mesh directly from scene.mvs.
+# LOW-MEMORY MODE (default):
+# Skip densify (biggest RAM hog). Attempt a coarse mesh directly.
 if [ "$SKIP_DENSE" = "1" ]; then
-  echo "[pipeline] SKIP_DENSE=1 -> skipping DensifyPointCloud, attempting coarse mesh from scene.mvs"
+  echo "[pipeline] SKIP_DENSE=1 -> attempting coarse mesh from scene.mvs"
 
-  "$RECON_MESH" \
+  run_openmvs "$RECON_MESH" \
     "$MVS_DIR/scene.mvs" \
     -w "$MVS_DIR"
 
+  # OpenMVS naming varies by build; grab first produced PLY
   if [ -f "$MVS_DIR/scene_mesh.ply" ]; then
     cp "$MVS_DIR/scene_mesh.ply" "$OUT_DIR/mesh.ply"
-    echo "[pipeline] done -> $OUT_DIR/mesh.ply (coarse mesh: scene_mesh.ply)"
+    echo "[pipeline] done -> $OUT_DIR/mesh.ply (scene_mesh.ply)"
     exit 0
   fi
 
-  MESH_CANDIDATE=$(ls -1 "$MVS_DIR"/*.ply 2>/dev/null | head -n 1 || true)
+  MESH_CANDIDATE="$(ls -1 "$MVS_DIR"/*.ply 2>/dev/null | head -n 1 || true)"
   if [ -n "$MESH_CANDIDATE" ]; then
     cp "$MESH_CANDIDATE" "$OUT_DIR/mesh.ply"
-    echo "[pipeline] done -> $OUT_DIR/mesh.ply (coarse mesh: $(basename "$MESH_CANDIDATE"))"
+    echo "[pipeline] done -> $OUT_DIR/mesh.ply ($(basename "$MESH_CANDIDATE"))"
     exit 0
   fi
 
@@ -140,29 +148,29 @@ if [ "$SKIP_DENSE" = "1" ]; then
   exit 4
 fi
 
-# 4) Densify point cloud (higher RAM)
+# 4) Densify point cloud (higher RAM) — only if enabled
 if [ ! -x "$DENSIFY" ]; then
   echo "[pipeline] ERROR: DensifyPointCloud not found/executable at $DENSIFY"
-  find /opt -maxdepth 5 -type f -name "DensifyPointCloud" -print || true
+  find /opt -maxdepth 6 -type f -name "DensifyPointCloud" -print || true
   exit 12
 fi
 
 echo "[pipeline] OpenMVS DensifyPointCloud..."
-"$DENSIFY" \
+run_openmvs "$DENSIFY" \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
   --resolution-level "$RES_LEVEL"
 
 # 5) Mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
-"$RECON_MESH" \
+run_openmvs "$RECON_MESH" \
   "$MVS_DIR/scene_dense.mvs" \
   -w "$MVS_DIR"
 
 if [ ! -f "$MVS_DIR/scene_dense_mesh.ply" ]; then
   echo "[pipeline] Expected mesh not found: $MVS_DIR/scene_dense_mesh.ply"
   ls -la "$MVS_DIR" || true
-  exit 4
+  exit 5
 fi
 
 cp "$MVS_DIR/scene_dense_mesh.ply" "$OUT_DIR/mesh.ply"
