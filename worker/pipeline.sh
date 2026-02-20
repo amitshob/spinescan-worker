@@ -99,30 +99,34 @@ colmap image_undistorter \
   --input_path "$MODEL_DIR" \
   --output_path "$UNDIST_DIR" \
   --output_type COLMAP
+ if [ ! -d "$UNDIST_DIR/images" ]; then
+  echo "[pipeline] ERROR: undistorted images folder missing: $UNDIST_DIR/images"
+  find "$UNDIST_DIR" -maxdepth 2 -type d -print
+  exit 13
+fi 
 
-# 5) Normalize sparse layout for InterfaceCOLMAP
-# Some COLMAP versions create: undistorted/sparse/0/{cameras,images,points3D}.txt
-# InterfaceCOLMAP expects:       undistorted/sparse/{cameras,images,points3D}.txt
-echo "[pipeline] normalize undistorted sparse folder..."
-if [ -d "$UNDIST_DIR/sparse/0" ] && [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
-  echo "[pipeline] moving sparse/0/* -> sparse/"
-  cp -f "$UNDIST_DIR/sparse/0/"*.txt "$UNDIST_DIR/sparse/" || true
+# 5) InterfaceCOLMAP expects:
+#   <UNDIST_DIR>/images/  (undistorted images)
+#   <UNDIST_DIR>/sparse/  (COLMAP model; binary preferred)
+#
+# After image_undistorter, COLMAP often writes:
+#   <UNDIST_DIR>/images/
+#   <UNDIST_DIR>/sparse/0/{cameras.bin,images.bin,points3D.bin}
+#
+# So we flatten sparse/0 -> sparse if needed.
+
+echo "[pipeline] normalize undistorted sparse folder (binary)..."
+if [ -d "$UNDIST_DIR/sparse/0" ]; then
+  if [ -f "$UNDIST_DIR/sparse/0/cameras.bin" ] && [ ! -f "$UNDIST_DIR/sparse/cameras.bin" ]; then
+    echo "[pipeline] moving sparse/0/*.bin -> sparse/"
+    cp -f "$UNDIST_DIR/sparse/0/"*.bin "$UNDIST_DIR/sparse/" || true
+  fi
 fi
 
-# If still not present, export to TXT directly into undistorted/sparse
-if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
-  echo "[pipeline] sparse txt not found after undistort; exporting TXT from model..."
-  colmap model_converter \
-    --input_path "$MODEL_DIR" \
-    --output_path "$UNDIST_DIR/sparse" \
-    --output_type TXT
-fi
-
-# Hard fail if missing
-if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
-  echo "[pipeline] ERROR: missing $UNDIST_DIR/sparse/cameras.txt"
-  ls -la "$UNDIST_DIR/sparse" || true
-  find "$UNDIST_DIR" -maxdepth 3 -type f | head -n 200 || true
+# Hard fail if missing binary model
+if [ ! -f "$UNDIST_DIR/sparse/cameras.bin" ]; then
+  echo "[pipeline] ERROR: missing $UNDIST_DIR/sparse/cameras.bin"
+  find "$UNDIST_DIR/sparse" -maxdepth 3 -type f | head -n 200 || true
   exit 12
 fi
 
