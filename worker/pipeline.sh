@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Keep memory predictable
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -21,8 +22,8 @@ echo "[pipeline] images: $IMAGES_DIR"
 echo "[pipeline] out:    $OUT_DIR"
 
 # --- knobs ---
-MAX_IMG_SIZE="${MAX_IMG_SIZE:-800}"
-SEQ_OVERLAP="${SEQ_OVERLAP:-8}"
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-640}"
+SEQ_OVERLAP="${SEQ_OVERLAP:-6}"
 SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"
 RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
 SKIP_DENSE="${SKIP_DENSE:-1}"   # keep 1 for now to avoid OOM
@@ -35,6 +36,11 @@ echo "[pipeline] OPENMVS_BIN=$OPENMVS_BIN"
 # Ensure tools exist
 command -v colmap >/dev/null 2>&1 || { echo "[pipeline] ERROR: colmap not found in PATH"; exit 11; }
 test -x "$OPENMVS_BIN/InterfaceCOLMAP" || { echo "[pipeline] ERROR: InterfaceCOLMAP missing at $OPENMVS_BIN/InterfaceCOLMAP"; exit 10; }
+
+# Run OpenMVS tools with their private libs ONLY for those commands
+run_openmvs () {
+  LD_LIBRARY_PATH="/opt/openmvs/lib:${LD_LIBRARY_PATH:-}" "$@"
+}
 
 # Count only jpg/jpeg (ignore metadata.json and others)
 IMG_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) | wc -l | tr -d ' ')
@@ -50,8 +56,11 @@ colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
+  --SiftExtraction.use_gpu 0 \
+  --SiftExtraction.num_threads 1 \
   --SiftExtraction.max_image_size "$MAX_IMG_SIZE" \
-  --SiftExtraction.use_gpu 0
+  --SiftExtraction.max_num_features 2500 \
+  --SiftExtraction.peak_threshold 0.03
 
 # 2) Sequential matching (CPU) - no loop detection to avoid visual index issues
 echo "[pipeline] colmap sequential_matcher..."
@@ -75,8 +84,7 @@ if [ ! -d "$MODEL_DIR" ]; then
   exit 3
 fi
 
-# (Optional) sanity: warn if too few registered images
-# images.bin existence implies model exists; for count, rely on text export:
+# Optional sanity: approximate registered image count via TXT export
 TMP_TXT="$OUT_DIR/model_txt"
 rm -rf "$TMP_TXT" || true
 mkdir -p "$TMP_TXT"
@@ -120,12 +128,12 @@ fi
 
 # 6) Convert COLMAP -> OpenMVS
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
-"$OPENMVS_BIN/InterfaceCOLMAP" \
+run_openmvs "$OPENMVS_BIN/InterfaceCOLMAP" \
   -i "$UNDIST_DIR" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# If you want ultra-low-memory MVP, stop here and output sparse point cloud
+# Ultra-low-memory MVP: stop here and output sparse point cloud
 if [ "$SKIP_DENSE" = "1" ]; then
   echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
   colmap model_converter \
@@ -136,15 +144,15 @@ if [ "$SKIP_DENSE" = "1" ]; then
   exit 0
 fi
 
-# 7) Dense + Mesh (likely OOM on small plans)
+# 7) Dense + Mesh (may OOM on small plans)
 echo "[pipeline] OpenMVS DensifyPointCloud..."
-"$OPENMVS_BIN/DensifyPointCloud" \
+run_openmvs "$OPENMVS_BIN/DensifyPointCloud" \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
   --resolution-level "$RES_LEVEL"
 
 echo "[pipeline] OpenMVS ReconstructMesh..."
-"$OPENMVS_BIN/ReconstructMesh" \
+run_openmvs "$OPENMVS_BIN/ReconstructMesh" \
   "$MVS_DIR/scene_dense.mvs" \
   -w "$MVS_DIR"
 
