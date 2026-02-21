@@ -99,7 +99,7 @@ colmap image_undistorter \
   --input_path "$MODEL_DIR" \
   --output_path "$UNDIST_DIR" \
   --output_type COLMAP
- if [ ! -d "$UNDIST_DIR/images" ]; then
+if [ ! -d "$UNDIST_DIR/images" ]; then
   echo "[pipeline] ERROR: undistorted images folder missing: $UNDIST_DIR/images"
   find "$UNDIST_DIR" -maxdepth 2 -type d -print
   exit 13
