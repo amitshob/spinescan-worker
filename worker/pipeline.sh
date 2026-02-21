@@ -26,7 +26,7 @@ MAX_IMG_SIZE="${MAX_IMG_SIZE:-640}"
 SEQ_OVERLAP="${SEQ_OVERLAP:-6}"
 SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"
 RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
-SKIP_DENSE="${SKIP_DENSE:-1}"   # keep 1 for now to avoid OOM
+SKIP_DENSE="${SKIP_DENSE:-1}"   # keep 1 for now to avoid OOM on small instances
 OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin}"
 
 echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
@@ -50,7 +50,7 @@ if [ "$IMG_COUNT" -lt 20 ]; then
   exit 2
 fi
 
-# 1) Feature extraction (CPU)
+# 1) Feature extraction (CPU, memory-capped)
 echo "[pipeline] colmap feature_extractor..."
 colmap feature_extractor \
   --database_path "$DB_PATH" \
@@ -62,7 +62,7 @@ colmap feature_extractor \
   --SiftExtraction.max_num_features 2500 \
   --SiftExtraction.peak_threshold 0.03
 
-# 2) Sequential matching (CPU) - no loop detection to avoid visual index issues
+# 2) Sequential matching (CPU) - loop detection OFF to avoid visual index issues
 echo "[pipeline] colmap sequential_matcher..."
 colmap sequential_matcher \
   --database_path "$DB_PATH" \
@@ -84,12 +84,12 @@ if [ ! -d "$MODEL_DIR" ]; then
   exit 3
 fi
 
-# Optional sanity: approximate registered image count via TXT export
+# Optional sanity: approximate registered image count via TXT export of MODEL_DIR
 TMP_TXT="$OUT_DIR/model_txt"
 rm -rf "$TMP_TXT" || true
 mkdir -p "$TMP_TXT"
 colmap model_converter --input_path "$MODEL_DIR" --output_path "$TMP_TXT" --output_type TXT >/dev/null 2>&1 || true
-REG_IMAGES=$(grep -c "^#" "$TMP_TXT/images.txt" 2>/dev/null || true)
+REG_IMAGES=$(grep -E "^[0-9]+ " "$TMP_TXT/images.txt" 2>/dev/null | wc -l | tr -d ' ')
 echo "[pipeline] registered images (approx): ${REG_IMAGES:-unknown}"
 
 # 4) Undistort for OpenMVS
@@ -99,34 +99,29 @@ colmap image_undistorter \
   --input_path "$MODEL_DIR" \
   --output_path "$UNDIST_DIR" \
   --output_type COLMAP
+
 if [ ! -d "$UNDIST_DIR/images" ]; then
   echo "[pipeline] ERROR: undistorted images folder missing: $UNDIST_DIR/images"
   find "$UNDIST_DIR" -maxdepth 2 -type d -print
   exit 13
-fi 
-
-# 5) InterfaceCOLMAP expects:
-#   <UNDIST_DIR>/images/  (undistorted images)
-#   <UNDIST_DIR>/sparse/  (COLMAP model; binary preferred)
-#
-# After image_undistorter, COLMAP often writes:
-#   <UNDIST_DIR>/images/
-#   <UNDIST_DIR>/sparse/0/{cameras.bin,images.bin,points3D.bin}
-#
-# So we flatten sparse/0 -> sparse if needed.
-
-echo "[pipeline] normalize undistorted sparse folder (binary)..."
-if [ -d "$UNDIST_DIR/sparse/0" ]; then
-  if [ -f "$UNDIST_DIR/sparse/0/cameras.bin" ] && [ ! -f "$UNDIST_DIR/sparse/cameras.bin" ]; then
-    echo "[pipeline] moving sparse/0/*.bin -> sparse/"
-    cp -f "$UNDIST_DIR/sparse/0/"*.bin "$UNDIST_DIR/sparse/" || true
-  fi
 fi
 
-# Hard fail if missing binary model
-if [ ! -f "$UNDIST_DIR/sparse/cameras.bin" ]; then
-  echo "[pipeline] ERROR: missing $UNDIST_DIR/sparse/cameras.bin"
-  find "$UNDIST_DIR/sparse" -maxdepth 3 -type f | head -n 200 || true
+# 5) InterfaceCOLMAP (this OpenMVS build) expects TXT model files:
+#   <UNDIST_DIR>/sparse/cameras.txt, images.txt, points3D.txt
+echo "[pipeline] ensure undistorted sparse TXT exists for InterfaceCOLMAP..."
+mkdir -p "$UNDIST_DIR/sparse"
+
+if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
+  echo "[pipeline] exporting TXT model -> $UNDIST_DIR/sparse"
+  colmap model_converter \
+    --input_path "$MODEL_DIR" \
+    --output_path "$UNDIST_DIR/sparse" \
+    --output_type TXT
+fi
+
+if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
+  echo "[pipeline] ERROR: still missing $UNDIST_DIR/sparse/cameras.txt"
+  find "$UNDIST_DIR/sparse" -maxdepth 2 -type f | head -n 200 || true
   exit 12
 fi
 
@@ -137,7 +132,7 @@ run_openmvs "$OPENMVS_BIN/InterfaceCOLMAP" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# Ultra-low-memory MVP: stop here and output sparse point cloud
+# Ultra-low-memory MVP: stop here and output sparse point cloud (NOT a mesh)
 if [ "$SKIP_DENSE" = "1" ]; then
   echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
   colmap model_converter \
