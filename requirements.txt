@@ -1,5 +1,4 @@
-supabase
-requests
-trimesh
-numpy
-
+supabase==2.28.0
+requests==2.32.5
+trimesh==4.11.2
+numpy==2.2.6
