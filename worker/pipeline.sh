@@ -105,6 +105,14 @@ if [ ! -d "$UNDIST_DIR/images" ]; then
   find "$UNDIST_DIR" -maxdepth 2 -type d -print
   exit 13
 fi
+echo "[pipeline] debug: first 40 lines cameras.txt"
+head -n 40 "$UNDIST_DIR/sparse/cameras.txt" || true
+
+echo "[pipeline] debug: first 60 lines images.txt"
+head -n 60 "$UNDIST_DIR/sparse/images.txt" || true
+
+echo "[pipeline] debug: count image header lines"
+grep -E "^[0-9]+ " "$UNDIST_DIR/sparse/images.txt" | wc -l || true
 
 # 5) InterfaceCOLMAP (this OpenMVS build) expects TXT model files:
 #   <UNDIST_DIR>/sparse/cameras.txt, images.txt, points3D.txt
