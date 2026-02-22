@@ -57,14 +57,19 @@ ARG OPENMVS_TAG=v2.3.0
 RUN git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
 
 # Configure OpenMVS; if it fails, dump logs so we can see the real cause
+# FIX: ensure we only exit 1 on *failure* (avoid &&/|| precedence trap)
 RUN cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
     -DOpenMVS_USE_CUDA=OFF \
     -DOpenMVS_USE_OPENMP=ON \
- || (echo "==== OpenMVS CMakeError.log ====" && cat /tmp/openmvs/build/CMakeFiles/CMakeError.log || true) \
- && (echo "==== OpenMVS CMakeOutput.log ====" && cat /tmp/openmvs/build/CMakeFiles/CMakeOutput.log || true) \
- && exit 1
+ || ( \
+    echo "==== OpenMVS CMakeError.log ===="; \
+    cat /tmp/openmvs/build/CMakeFiles/CMakeError.log || true; \
+    echo "==== OpenMVS CMakeOutput.log ===="; \
+    cat /tmp/openmvs/build/CMakeFiles/CMakeOutput.log || true; \
+    exit 1; \
+ )
 
 # Build/install OpenMVS (also limit parallelism)
 RUN cmake --build /tmp/openmvs/build --target install -- -j2
