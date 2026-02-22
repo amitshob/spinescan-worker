@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng-dev libjpeg-dev libtiff-dev \
     libtbb-dev \
     libgl1-mesa-dev libglu1-mesa-dev \
+    libcgal-dev libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Build COLMAP (CPU-only, no GUI, no CUDA) ---
