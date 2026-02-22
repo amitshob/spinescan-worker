@@ -1,15 +1,20 @@
 # =========================
-# SpineScan Worker Dockerfile (STABLE)
+# SpineScan Worker Dockerfile (STABLE, LOW-RAM BUILD)
 # Build COLMAP (CPU) + OpenMVS from source on Ubuntu 22.04
-# Fixes:
-# - InterfaceCOLMAP std::out_of_range (COLMAP/OpenMVS format mismatch)
-# - GLIBC / GLIBCXX / libstdc++ conflicts (single toolchain)
-# - PEP668 issues (use venv)
+#
+# Key fix: Render build OOM (>8GB) during cmake --build
+# -> Force single-thread compilation & linking:
+#    - ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+#    - cmake --build ... --parallel 1
 # =========================
 
 # ---------- Stage 1: Build COLMAP + OpenMVS ----------
 FROM ubuntu:22.04 AS builder
 ARG DEBIAN_FRONTEND=noninteractive
+
+# Force single-thread builds (critical for Render build memory)
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+ENV MAKEFLAGS="-j1"
 
 # Core build tools + deps (COLMAP + OpenMVS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,26 +32,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng-dev libjpeg-dev libtiff-dev \
     libtbb-dev \
     libgl1-mesa-dev libglu1-mesa-dev \
+    # COLMAP 3.9 needs CGAL; 3.8 usually does not. Keep to be safe.
     libcgal-dev libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Build COLMAP (CPU-only, no GUI, no CUDA) ---
-ARG COLMAP_TAG=3.9
+# RECOMMENDED: 3.8 is lighter and usually easier on RAM than 3.9.
+# If you must use 3.9, set COLMAP_TAG=3.9
+ARG COLMAP_TAG=3.8
 RUN git clone --depth 1 --branch ${COLMAP_TAG} https://github.com/colmap/colmap.git /tmp/colmap
+
 RUN cmake -S /tmp/colmap -B /tmp/colmap/build -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/opt/colmap \
     -DGUI_ENABLED=OFF \
-    -DCUDA_ENABLED=OFF
-RUN cmake --build /tmp/colmap/build --target install
+    -DCUDA_ENABLED=OFF \
+    -DTESTS_ENABLED=OFF
+
+# IMPORTANT: single-thread build to avoid OOM
+RUN cmake --build /tmp/colmap/build --target install --parallel 1
 
 # --- Build OpenMVS ---
 ARG OPENMVS_TAG=v2.3.0
 RUN git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
+
 RUN cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/opt/openmvs
-RUN cmake --build /tmp/openmvs/build --target install
+
+# IMPORTANT: single-thread build to avoid OOM
+RUN cmake --build /tmp/openmvs/build --target install --parallel 1
 
 # ---------- Stage 2: Runtime ----------
 FROM ubuntu:22.04 AS runtime
