@@ -1,15 +1,14 @@
 # =========================
 # SpineScan Worker Dockerfile (STABLE + DEBUGGABLE)
 # Build COLMAP (CPU) + OpenMVS from source on Ubuntu 22.04
-# Fixes/helps:
-# - Adds missing OpenMVS deps (Python dev, VTK, Boost iostreams/serialization, Atlas)
-# - On failure, prints CMakeError.log/CMakeOutput.log for OpenMVS configure
-# - Uses venv to avoid PEP668
 # =========================
 
 # ---------- Stage 1: Build COLMAP + OpenMVS ----------
 FROM ubuntu:22.04 AS builder
 ARG DEBIAN_FRONTEND=noninteractive
+
+# Use bash so we can reliably capture logs and exit codes
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Core build tools + deps (COLMAP + OpenMVS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,36 +48,43 @@ RUN cmake -S /tmp/colmap -B /tmp/colmap/build -GNinja \
     -DCMAKE_INSTALL_PREFIX=/opt/colmap \
     -DGUI_ENABLED=OFF \
     -DCUDA_ENABLED=OFF
-# (build can be heavy; -j2 is safer on constrained builders)
 RUN cmake --build /tmp/colmap/build --target install -- -j2
 
 # --- Build OpenMVS ---
 ARG OPENMVS_TAG=v2.3.0
 RUN git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
 
-# Configure OpenMVS; if it fails, dump logs so we can see the real cause
-# FIX: ensure we only exit 1 on *failure* (avoid &&/|| precedence trap)
-RUN cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
-    -DOpenMVS_USE_CUDA=OFF \
-    -DOpenMVS_USE_OPENMP=ON \
- || ( \
-    echo "==== OpenMVS CMakeError.log ===="; \
-    cat /tmp/openmvs/build/CMakeFiles/CMakeError.log || true; \
-    echo "==== OpenMVS CMakeOutput.log ===="; \
-    cat /tmp/openmvs/build/CMakeFiles/CMakeOutput.log || true; \
-    exit 1; \
- )
+# Configure OpenMVS; capture output so Render shows the real error
+RUN set -eux; \
+    rm -rf /tmp/openmvs/build; \
+    mkdir -p /tmp/openmvs/build; \
+    ( cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
+        -DOpenMVS_USE_CUDA=OFF \
+        -DOpenMVS_USE_OPENMP=ON \
+      2>&1 | tee /tmp/openmvs_configure.log ); \
+    ec=${PIPESTATUS[0]}; \
+    if [ "$ec" -ne 0 ]; then \
+      echo "==== OpenMVS CMake configure FAILED (exit=$ec) ===="; \
+      echo "==== /tmp/openmvs_configure.log (last 200 lines) ===="; \
+      tail -n 200 /tmp/openmvs_configure.log || true; \
+      echo "==== CMakeFiles directory listing ===="; \
+      ls -lah /tmp/openmvs/build/CMakeFiles || true; \
+      echo "==== OpenMVS CMakeError.log ===="; \
+      cat /tmp/openmvs/build/CMakeFiles/CMakeError.log || true; \
+      echo "==== OpenMVS CMakeOutput.log ===="; \
+      cat /tmp/openmvs/build/CMakeFiles/CMakeOutput.log || true; \
+      exit "$ec"; \
+    fi
 
-# Build/install OpenMVS (also limit parallelism)
+# Build/install OpenMVS (limit parallelism)
 RUN cmake --build /tmp/openmvs/build --target install -- -j2
 
 # ---------- Stage 2: Runtime ----------
 FROM ubuntu:22.04 AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Runtime deps + Python tooling
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bash \
     python3 python3-venv python3-pip \
@@ -93,46 +99,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
     libtbb2 \
     libgl1-mesa-glx libglu1-mesa \
-    \
-    # OpenMVS sometimes links against VTK at runtime (depending on build)
     libvtk9.1 \
-    \
     && rm -rf /var/lib/apt/lists/*
 
-# Locale (prevents Python encoding/venv weirdness)
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-
-# Headless Qt safety (prevents OpenGL display requirements)
 ENV QT_QPA_PLATFORM=offscreen
 
-# Copy built tools
 COPY --from=builder /opt/colmap /opt/colmap
 COPY --from=builder /opt/openmvs /opt/openmvs
 
-# Put tools on PATH
 ENV PATH="/opt/colmap/bin:/opt/openmvs/bin:${PATH}"
 
-# Register libs (safe because both were built in the same environment)
 RUN echo "/opt/colmap/lib" > /etc/ld.so.conf.d/colmap.conf && \
     echo "/opt/openmvs/lib" > /etc/ld.so.conf.d/openmvs.conf && \
     ldconfig
 
-# Python venv (avoids PEP668)
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /app
 
-# Install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy worker
 COPY worker ./worker
 RUN chmod +x /app/worker/pipeline.sh
 
-# Quick sanity checks (fail fast if something is off)
 RUN colmap -h >/dev/null 2>&1
 RUN InterfaceCOLMAP -h >/dev/null 2>&1
 
