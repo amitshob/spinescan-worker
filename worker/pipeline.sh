@@ -45,8 +45,8 @@ run_openmvs () {
 # Count only jpg/jpeg (ignore metadata.json and others)
 IMG_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) | wc -l | tr -d ' ')
 echo "[pipeline] image count: $IMG_COUNT"
-if [ "$IMG_COUNT" -lt 20 ]; then
-  echo "[pipeline] Not enough images ($IMG_COUNT). Need at least 20."
+if [ "$IMG_COUNT" -lt 40 ]; then
+  echo "[pipeline] Not enough images ($IMG_COUNT). Need at least 40."
   exit 2
 fi
 
@@ -105,35 +105,60 @@ if [ ! -d "$UNDIST_DIR/images" ]; then
   find "$UNDIST_DIR" -maxdepth 2 -type d -print
   exit 13
 fi
-echo "[pipeline] debug: first 40 lines cameras.txt"
-head -n 40 "$UNDIST_DIR/sparse/cameras.txt" || true
 
-echo "[pipeline] debug: first 60 lines images.txt"
-head -n 60 "$UNDIST_DIR/sparse/images.txt" || true
-
-echo "[pipeline] debug: count image header lines"
-grep -E "^[0-9]+ " "$UNDIST_DIR/sparse/images.txt" | wc -l || true
-
-# 5) InterfaceCOLMAP (this OpenMVS build) expects TXT model files:
-#   <UNDIST_DIR>/sparse/cameras.txt, images.txt, points3D.txt
+# 5) Convert the UNDISTORTED sparse model (not the original) to TXT for InterfaceCOLMAP.
+#    image_undistorter writes a binary sparse model to $UNDIST_DIR/sparse/; we need TXT.
+#    FIX: previously this converted from MODEL_DIR (original distorted model) which gave
+#    InterfaceCOLMAP mismatched camera intrinsics. Now we convert from $UNDIST_DIR/sparse.
 echo "[pipeline] ensure undistorted sparse TXT exists for InterfaceCOLMAP..."
-mkdir -p "$UNDIST_DIR/sparse"
 
-if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
-  echo "[pipeline] exporting TXT model -> $UNDIST_DIR/sparse"
-  colmap model_converter \
-    --input_path "$MODEL_DIR" \
-    --output_path "$UNDIST_DIR/sparse" \
-    --output_type TXT
+UNDIST_SPARSE="$UNDIST_DIR/sparse"
+mkdir -p "$UNDIST_SPARSE"
+
+if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
+  # Check if the undistorter produced a binary model we can convert
+  if [ -f "$UNDIST_SPARSE/cameras.bin" ]; then
+    echo "[pipeline] converting undistorted binary model -> TXT"
+    colmap model_converter \
+      --input_path "$UNDIST_SPARSE" \
+      --output_path "$UNDIST_SPARSE" \
+      --output_type TXT
+  else
+    # Fallback: undistorter did not write a sparse folder at all (older COLMAP versions).
+    # Export from MODEL_DIR as a last resort, with a clear warning.
+    echo "[pipeline] WARNING: $UNDIST_SPARSE/cameras.bin not found; falling back to original MODEL_DIR for TXT export."
+    echo "[pipeline] Camera intrinsics may not exactly match undistorted images."
+    colmap model_converter \
+      --input_path "$MODEL_DIR" \
+      --output_path "$UNDIST_SPARSE" \
+      --output_type TXT
+  fi
 fi
 
-if [ ! -f "$UNDIST_DIR/sparse/cameras.txt" ]; then
-  echo "[pipeline] ERROR: still missing $UNDIST_DIR/sparse/cameras.txt"
-  find "$UNDIST_DIR/sparse" -maxdepth 2 -type f | head -n 200 || true
+if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
+  echo "[pipeline] ERROR: still missing $UNDIST_SPARSE/cameras.txt after conversion attempts"
+  find "$UNDIST_SPARSE" -maxdepth 2 -type f | head -n 200 || true
   exit 12
 fi
 
+echo "[pipeline] debug: first 40 lines cameras.txt"
+head -n 40 "$UNDIST_SPARSE/cameras.txt" || true
+
+echo "[pipeline] debug: first 60 lines images.txt"
+head -n 60 "$UNDIST_SPARSE/images.txt" || true
+
+echo "[pipeline] debug: count image header lines"
+grep -E "^[0-9]+ " "$UNDIST_SPARSE/images.txt" | wc -l || true
+
+# Check points3D.txt is present and non-trivial; warn if empty as it will hurt densification.
+POINT_COUNT=$(grep -c -E "^[0-9]+" "$UNDIST_SPARSE/points3D.txt" 2>/dev/null || echo "0")
+echo "[pipeline] points3D count: $POINT_COUNT"
+if [ "$POINT_COUNT" -eq 0 ]; then
+  echo "[pipeline] WARNING: points3D.txt is empty. Dense reconstruction may be lower quality."
+fi
+
 # 6) Convert COLMAP -> OpenMVS
+#    -i must point to the directory containing images/ and sparse/ (with TXT files).
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
 run_openmvs "$OPENMVS_BIN/InterfaceCOLMAP" \
   -i "$UNDIST_DIR" \
