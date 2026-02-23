@@ -52,14 +52,16 @@ RUN cmake --build /tmp/colmap/build --target install -- -j2
 
 # --- Build OpenMVS ---
 ARG OPENMVS_TAG=v2.3.0
-RUN git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
 
-# OpenMVS's CMake project expects modules under openMVS/build/*
-# IMPORTANT: do NOT use the repo root as -S; use /tmp/openmvs/build as the source dir
+# IMPORTANT: fetch submodules so build/Utils.cmake exists
+RUN git clone --recurse-submodules --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
+RUN cd /tmp/openmvs && git submodule update --init --recursive
+
+# Configure OpenMVS; capture output so Render shows the real error
 RUN set -eux; \
     rm -rf /tmp/openmvs/build_out; \
     mkdir -p /tmp/openmvs/build_out; \
-    ( cmake -S /tmp/openmvs/build -B /tmp/openmvs/build_out -GNinja \
+    ( cmake -S /tmp/openmvs -B /tmp/openmvs/build_out -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
         -DOpenMVS_USE_CUDA=OFF \
