@@ -50,10 +50,12 @@ RUN cmake -S /tmp/colmap -B /tmp/colmap/build -GNinja \
     -DCUDA_ENABLED=OFF
 RUN cmake --build /tmp/colmap/build --target install -- -j2
 
+# --- Get VCG (vcglib) required by OpenMVS ---
+# OpenMVS expects VCG_ROOT to point to a directory containing "vcg/"
+RUN git clone --depth 1 https://github.com/cdcseacave/VCG.git /tmp/vcglib
+
 # --- Build OpenMVS ---
 ARG OPENMVS_TAG=v2.3.0
-
-# IMPORTANT: fetch submodules so build/Utils.cmake exists
 RUN git clone --recurse-submodules --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
 RUN cd /tmp/openmvs && git submodule update --init --recursive
 
@@ -64,6 +66,7 @@ RUN set -eux; \
     ( cmake -S /tmp/openmvs -B /tmp/openmvs/build_out -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
+        -DVCG_ROOT=/tmp/vcglib \
         -DOpenMVS_USE_CUDA=OFF \
         -DOpenMVS_USE_OPENMP=ON \
       2>&1 | tee /tmp/openmvs_configure.log ); \
