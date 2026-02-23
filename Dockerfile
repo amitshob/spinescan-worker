@@ -104,26 +104,25 @@ ENV PATH="/opt/venv/bin:${PATH}"
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN set -eux; \
+    pip install --no-cache-dir --progress-bar off -r requirements.txt; \
+    echo "[runtime] pip install OK"
+    
 COPY worker ./worker
 RUN chmod +x /app/worker/pipeline.sh
 
 # Quick sanity checks (fail fast if something is off)
 RUN colmap -h >/dev/null 2>&1
 
-# Robust OpenMVS sanity: don't assume PATH; show what's installed
+# ---- Sanity checks ----
 RUN set -eux; \
-    echo "[sanity] PATH=$PATH"; \
-    echo "[sanity] /opt/openmvs contents:"; ls -lah /opt/openmvs || true; \
-    echo "[sanity] /opt/openmvs/bin contents:"; ls -lah /opt/openmvs/bin || true; \
-    if [ -x /opt/openmvs/bin/InterfaceCOLMAP ]; then \
-      /opt/openmvs/bin/InterfaceCOLMAP -h >/dev/null 2>&1; \
-    else \
-      echo "[sanity] ERROR: InterfaceCOLMAP not found at /opt/openmvs/bin/InterfaceCOLMAP"; \
-      echo "[sanity] searching for InterfaceCOLMAP under /opt/openmvs ..."; \
-      find /opt/openmvs -maxdepth 4 -type f -iname "InterfaceCOLMAP*" -print || true; \
-      exit 127; \
-    fi
+    colmap -h >/dev/null 2>&1; \
+    echo "[runtime] colmap OK"
+
+RUN set -eux; \
+    ls -lah /opt/openmvs/bin || true; \
+    /opt/openmvs/bin/InterfaceCOLMAP -h >/dev/null 2>&1; \
+    echo "[runtime] InterfaceCOLMAP OK"
+
 
 CMD ["python", "-u", "worker/main.py"]
