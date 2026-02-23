@@ -54,11 +54,12 @@ RUN cmake --build /tmp/colmap/build --target install -- -j2
 ARG OPENMVS_TAG=v2.3.0
 RUN git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs
 
-# Configure OpenMVS; capture output so Render shows the real error
+# OpenMVS's CMake project expects modules under openMVS/build/*
+# IMPORTANT: do NOT use the repo root as -S; use /tmp/openmvs/build as the source dir
 RUN set -eux; \
-    rm -rf /tmp/openmvs/build; \
-    mkdir -p /tmp/openmvs/build; \
-    ( cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
+    rm -rf /tmp/openmvs/build_out; \
+    mkdir -p /tmp/openmvs/build_out; \
+    ( cmake -S /tmp/openmvs/build -B /tmp/openmvs/build_out -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/openmvs \
         -DOpenMVS_USE_CUDA=OFF \
@@ -70,21 +71,22 @@ RUN set -eux; \
       echo "==== /tmp/openmvs_configure.log (last 200 lines) ===="; \
       tail -n 200 /tmp/openmvs_configure.log || true; \
       echo "==== CMakeFiles directory listing ===="; \
-      ls -lah /tmp/openmvs/build/CMakeFiles || true; \
+      ls -lah /tmp/openmvs/build_out/CMakeFiles || true; \
       echo "==== OpenMVS CMakeError.log ===="; \
-      cat /tmp/openmvs/build/CMakeFiles/CMakeError.log || true; \
+      cat /tmp/openmvs/build_out/CMakeFiles/CMakeError.log || true; \
       echo "==== OpenMVS CMakeOutput.log ===="; \
-      cat /tmp/openmvs/build/CMakeFiles/CMakeOutput.log || true; \
+      cat /tmp/openmvs/build_out/CMakeFiles/CMakeOutput.log || true; \
       exit "$ec"; \
     fi
 
 # Build/install OpenMVS (limit parallelism)
-RUN cmake --build /tmp/openmvs/build --target install -- -j2
+RUN cmake --build /tmp/openmvs/build_out --target install -- -j2
 
 # ---------- Stage 2: Runtime ----------
 FROM ubuntu:22.04 AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Runtime deps + Python tooling
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bash \
     python3 python3-venv python3-pip \
@@ -99,13 +101,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
     libtbb2 \
     libgl1-mesa-glx libglu1-mesa \
+    \
+    # OpenMVS sometimes links against VTK at runtime (depending on build)
     libvtk9.1 \
+    \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV QT_QPA_PLATFORM=offscreen
 
+# Copy built tools
 COPY --from=builder /opt/colmap /opt/colmap
 COPY --from=builder /opt/openmvs /opt/openmvs
 
