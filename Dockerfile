@@ -83,16 +83,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bash \
     python3 python3-venv python3-pip \
     \
-    libboost-filesystem1.74.0 libboost-graph1.74.0 libboost-program-options1.74.0 libboost-system1.74.0 \
+    # COLMAP runtime libs
+    libboost-filesystem1.74.0 libboost-graph1.74.0 \
+    libboost-program-options1.74.0 libboost-system1.74.0 \
     libboost-iostreams1.74.0 libboost-serialization1.74.0 \
     libceres2 libgflags2.2 libgoogle-glog0v5 \
     libfreeimage3 libglew2.2 \
     libsqlite3-0 \
-    libopencv-core4.5d libopencv-imgproc4.5d libopencv-imgcodecs4.5d \
     libqt5core5a libqt5gui5 libqt5widgets5 libqt5opengl5 \
+    \
+    # OpenCV — full set that OpenMVS links against
+    libopencv-core4.5d \
+    libopencv-imgproc4.5d \
+    libopencv-imgcodecs4.5d \
+    libopencv-calib3d4.5d \
+    libopencv-features2d4.5d \
+    libopencv-flann4.5d \
+    libopencv-highgui4.5d \
+    libopencv-video4.5d \
+    libopencv-videoio4.5d \
+    \
+    # OpenMVS runtime libs
     libtbb2 \
     libgl1-mesa-glx libglu1-mesa \
     libvtk9.1 \
+    libcgal-dev \
+    libgmp10 \
+    libmpfr6 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=C.UTF-8
@@ -129,11 +146,16 @@ RUN set -eux; \
     colmap -h >/dev/null 2>&1; \
     echo "[runtime] colmap OK"
 
-# Sanity: verify InterfaceCOLMAP at its real install location
+# Sanity: verify InterfaceCOLMAP links and runs cleanly.
+# Show ldd output so missing libs are visible in build logs if it fails.
 RUN set -eux; \
     echo "[runtime] /opt/openmvs/bin:"; ls -lah /opt/openmvs/bin || true; \
     echo "[runtime] /opt/openmvs/bin/OpenMVS:"; ls -lah /opt/openmvs/bin/OpenMVS || true; \
-    /opt/openmvs/bin/OpenMVS/InterfaceCOLMAP -h >/dev/null 2>&1; \
+    echo "[runtime] ldd InterfaceCOLMAP:"; \
+    ldd /opt/openmvs/bin/OpenMVS/InterfaceCOLMAP 2>&1 || true; \
+    echo "[runtime] checking for missing libs:"; \
+    ldd /opt/openmvs/bin/OpenMVS/InterfaceCOLMAP 2>&1 | grep "not found" && echo "MISSING LIBS ABOVE" && exit 1 || true; \
+    LD_LIBRARY_PATH="/opt/openmvs/lib" /opt/openmvs/bin/OpenMVS/InterfaceCOLMAP -h 2>&1 || true; \
     echo "[runtime] InterfaceCOLMAP OK"
 
 CMD ["python", "-u", "worker/main.py"]
