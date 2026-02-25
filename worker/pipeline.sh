@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Keep memory predictable
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
+export OMP_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+export MKL_NUM_THREADS=2
 
 IMAGES_DIR="$1"
 OUT_DIR="$2"
@@ -22,11 +22,11 @@ echo "[pipeline] images: $IMAGES_DIR"
 echo "[pipeline] out:    $OUT_DIR"
 
 # --- knobs ---
-MAX_IMG_SIZE="${MAX_IMG_SIZE:-640}"
-SEQ_OVERLAP="${SEQ_OVERLAP:-6}"
+MAX_IMG_SIZE="${MAX_IMG_SIZE:-1280}"
+SEQ_OVERLAP="${SEQ_OVERLAP:-10}"
 SEQ_LOOP_DETECT="${SEQ_LOOP_DETECT:-0}"
 RES_LEVEL="${OPENMVS_RES_LEVEL:-4}"
-SKIP_DENSE="${SKIP_DENSE:-1}"   # keep 1 for now to avoid OOM on small instances
+SKIP_DENSE="${SKIP_DENSE:-0}"
 OPENMVS_BIN="${OPENMVS_BIN:-/opt/openmvs/bin/OpenMVS}"
 
 echo "[pipeline] MAX_IMG_SIZE=$MAX_IMG_SIZE OPENMVS_RES_LEVEL=$RES_LEVEL SKIP_DENSE=$SKIP_DENSE"
@@ -50,32 +50,44 @@ if [ "$IMG_COUNT" -lt 40 ]; then
   exit 2
 fi
 
-# 1) Feature extraction (CPU, memory-capped)
+# 1) Feature extraction
+#    - Raised max_image_size to 1280 (was 640) for more detail per image
+#    - Raised max_num_features to 8192 (was 2500) to extract more keypoints per image
+#    - Lowered peak_threshold to 0.005 (was 0.03) to pick up more features on low-texture surfaces
+#    - Lowered edge_threshold to 10 (was default 16) to retain more features near edges
 echo "[pipeline] colmap feature_extractor..."
 colmap feature_extractor \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
   --ImageReader.single_camera 1 \
   --SiftExtraction.use_gpu 0 \
-  --SiftExtraction.num_threads 1 \
+  --SiftExtraction.num_threads 2 \
   --SiftExtraction.max_image_size "$MAX_IMG_SIZE" \
-  --SiftExtraction.max_num_features 2500 \
-  --SiftExtraction.peak_threshold 0.03
+  --SiftExtraction.max_num_features 8192 \
+  --SiftExtraction.peak_threshold 0.005 \
+  --SiftExtraction.edge_threshold 10
 
-# 2) Sequential matching (CPU) - loop detection OFF to avoid visual index issues
+# 2) Sequential matching
+#    - Raised overlap to 10 (was 6) so each image tries to match more neighbours
+#    - This significantly helps when some images are hard to match
 echo "[pipeline] colmap sequential_matcher..."
 colmap sequential_matcher \
   --database_path "$DB_PATH" \
   --SiftMatching.use_gpu 0 \
+  --SiftMatching.num_threads 2 \
   --SequentialMatching.overlap "$SEQ_OVERLAP" \
   --SequentialMatching.loop_detection "$SEQ_LOOP_DETECT"
 
 # 3) Sparse reconstruction
+#    - Lowered min_num_matches to 8 (default 15) to allow weaker but still valid matches
+#    - Lowered init_min_num_inliers to 30 (default 100) to help initialise on low-feature scenes
 echo "[pipeline] colmap mapper..."
 colmap mapper \
   --database_path "$DB_PATH" \
   --image_path "$IMAGES_DIR" \
-  --output_path "$SPARSE_DIR"
+  --output_path "$SPARSE_DIR" \
+  --Mapper.min_num_matches 8 \
+  --Mapper.init_min_num_inliers 30
 
 MODEL_DIR="$SPARSE_DIR/0"
 if [ ! -d "$MODEL_DIR" ]; then
@@ -84,13 +96,18 @@ if [ ! -d "$MODEL_DIR" ]; then
   exit 3
 fi
 
-# Optional sanity: approximate registered image count via TXT export of MODEL_DIR
+# Sanity: approximate registered image count
 TMP_TXT="$OUT_DIR/model_txt"
 rm -rf "$TMP_TXT" || true
 mkdir -p "$TMP_TXT"
 colmap model_converter --input_path "$MODEL_DIR" --output_path "$TMP_TXT" --output_type TXT >/dev/null 2>&1 || true
 REG_IMAGES=$(grep -E "^[0-9]+ " "$TMP_TXT/images.txt" 2>/dev/null | wc -l | tr -d ' ')
-echo "[pipeline] registered images (approx): ${REG_IMAGES:-unknown}"
+echo "[pipeline] registered images: ${REG_IMAGES:-unknown} / $IMG_COUNT"
+
+# Warn if registration rate is poor
+if [ -n "$REG_IMAGES" ] && [ "$REG_IMAGES" -lt 20 ]; then
+  echo "[pipeline] WARNING: Very few images registered ($REG_IMAGES). Output quality will be poor."
+fi
 
 # 4) Undistort for OpenMVS
 echo "[pipeline] colmap image_undistorter..."
@@ -106,17 +123,14 @@ if [ ! -d "$UNDIST_DIR/images" ]; then
   exit 13
 fi
 
-# 5) Convert the UNDISTORTED sparse model (not the original) to TXT for InterfaceCOLMAP.
+# 5) Convert the UNDISTORTED sparse model to TXT for InterfaceCOLMAP.
 #    image_undistorter writes a binary sparse model to $UNDIST_DIR/sparse/; we need TXT.
-#    FIX: previously this converted from MODEL_DIR (original distorted model) which gave
-#    InterfaceCOLMAP mismatched camera intrinsics. Now we convert from $UNDIST_DIR/sparse.
 echo "[pipeline] ensure undistorted sparse TXT exists for InterfaceCOLMAP..."
 
 UNDIST_SPARSE="$UNDIST_DIR/sparse"
 mkdir -p "$UNDIST_SPARSE"
 
 if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
-  # Check if the undistorter produced a binary model we can convert
   if [ -f "$UNDIST_SPARSE/cameras.bin" ]; then
     echo "[pipeline] converting undistorted binary model -> TXT"
     colmap model_converter \
@@ -124,10 +138,7 @@ if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
       --output_path "$UNDIST_SPARSE" \
       --output_type TXT
   else
-    # Fallback: undistorter did not write a sparse folder at all (older COLMAP versions).
-    # Export from MODEL_DIR as a last resort, with a clear warning.
-    echo "[pipeline] WARNING: $UNDIST_SPARSE/cameras.bin not found; falling back to original MODEL_DIR for TXT export."
-    echo "[pipeline] Camera intrinsics may not exactly match undistorted images."
+    echo "[pipeline] WARNING: $UNDIST_SPARSE/cameras.bin not found; falling back to original MODEL_DIR."
     colmap model_converter \
       --input_path "$MODEL_DIR" \
       --output_path "$UNDIST_SPARSE" \
@@ -136,21 +147,15 @@ if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
 fi
 
 if [ ! -f "$UNDIST_SPARSE/cameras.txt" ]; then
-  echo "[pipeline] ERROR: still missing $UNDIST_SPARSE/cameras.txt after conversion attempts"
+  echo "[pipeline] ERROR: still missing $UNDIST_SPARSE/cameras.txt"
   find "$UNDIST_SPARSE" -maxdepth 2 -type f | head -n 200 || true
   exit 12
 fi
 
-echo "[pipeline] debug: first 40 lines cameras.txt"
-head -n 40 "$UNDIST_SPARSE/cameras.txt" || true
+echo "[pipeline] debug: cameras.txt"
+head -n 10 "$UNDIST_SPARSE/cameras.txt" || true
 
-echo "[pipeline] debug: first 60 lines images.txt"
-head -n 60 "$UNDIST_SPARSE/images.txt" || true
-
-echo "[pipeline] debug: count image header lines"
-grep -E "^[0-9]+ " "$UNDIST_SPARSE/images.txt" | wc -l || true
-
-# Check points3D.txt is present and non-trivial; warn if empty as it will hurt densification.
+# Check points3D count
 POINT_COUNT=$(grep -c -E "^[0-9]+" "$UNDIST_SPARSE/points3D.txt" 2>/dev/null || echo "0")
 echo "[pipeline] points3D count: $POINT_COUNT"
 if [ "$POINT_COUNT" -eq 0 ]; then
@@ -158,14 +163,13 @@ if [ "$POINT_COUNT" -eq 0 ]; then
 fi
 
 # 6) Convert COLMAP -> OpenMVS
-#    -i must point to the directory containing images/ and sparse/ (with TXT files).
 echo "[pipeline] OpenMVS InterfaceCOLMAP..."
 run_openmvs "$OPENMVS_BIN/InterfaceCOLMAP" \
   -i "$UNDIST_DIR" \
   -o "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR"
 
-# Ultra-low-memory MVP: stop here and output sparse point cloud (NOT a mesh)
+# Ultra-low-memory fallback: skip dense and output sparse point cloud as PLY
 if [ "$SKIP_DENSE" = "1" ]; then
   echo "[pipeline] SKIP_DENSE=1 -> exporting sparse model as PLY point cloud"
   colmap model_converter \
@@ -176,23 +180,30 @@ if [ "$SKIP_DENSE" = "1" ]; then
   exit 0
 fi
 
-# 7) Dense + Mesh (may OOM on small plans)
+# 7) Densify point cloud
 echo "[pipeline] OpenMVS DensifyPointCloud..."
 run_openmvs "$OPENMVS_BIN/DensifyPointCloud" \
   "$MVS_DIR/scene.mvs" \
   -w "$MVS_DIR" \
   --resolution-level "$RES_LEVEL"
 
+if [ ! -f "$MVS_DIR/scene_dense.mvs" ]; then
+  echo "[pipeline] ERROR: scene_dense.mvs not produced. DensifyPointCloud may have failed."
+  ls -la "$MVS_DIR" || true
+  exit 5
+fi
+
+# 8) Reconstruct mesh
 echo "[pipeline] OpenMVS ReconstructMesh..."
 run_openmvs "$OPENMVS_BIN/ReconstructMesh" \
   "$MVS_DIR/scene_dense.mvs" \
   -w "$MVS_DIR"
 
 if [ ! -f "$MVS_DIR/scene_dense_mesh.ply" ]; then
-  echo "[pipeline] Expected mesh not found: $MVS_DIR/scene_dense_mesh.ply"
+  echo "[pipeline] ERROR: Expected mesh not found: $MVS_DIR/scene_dense_mesh.ply"
   ls -la "$MVS_DIR" || true
   exit 4
 fi
 
 cp "$MVS_DIR/scene_dense_mesh.ply" "$OUT_DIR/mesh.ply"
-echo "[pipeline] done -> $OUT_DIR/mesh.ply"
+echo "[pipeline] done -> $OUT_DIR/mesh.ply (dense mesh)"
